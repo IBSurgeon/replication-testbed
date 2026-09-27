@@ -8,13 +8,29 @@ def norm(p):
     return (p or "").replace("\\", "/").lower()
 
 
-def replica_record(cl, replica, master_path):
-    """The replica's own record of its copy of master_path, or None. A replica
-    may hold two records for one file (hqcluster-node N-12: its own scan and
-    the reinit); the one with the highest generation is the live one."""
+def replica_records(cl, replica, master_path):
+    """Every record the replica holds for its copy of master_path."""
     want = norm(cl.replica_path(replica, master_path))
-    recs = [d for d in cl.databases(replica) if norm(d.get("path")) == want]
-    return max(recs, key=lambda d: int(d.get("generation") or 0)) if recs else None
+    return [d for d in cl.databases(replica) if norm(d.get("path")) == want]
+
+
+def replica_record(cl, replica, master_path):
+    """The replica's own record of its copy of master_path, or None. There is
+    one per file (hqcluster-node N-12; converge_and_record checks it)."""
+    recs = replica_records(cl, replica, master_path)
+    return recs[0] if recs else None
+
+
+def duplicate_records(cl, paths, replicas=None):
+    """{replica: {path: [db_id, ...]}} for every file a replica holds more
+    than one record of (hqcluster-node N-12)."""
+    bad = {}
+    for p in paths:
+        for r in replicas or cl.cfg.replicas:
+            recs = replica_records(cl, r, p)
+            if len(recs) > 1:
+                bad.setdefault(r, {})[p] = [d.get("db_id") for d in recs]
+    return bad
 
 
 def replica_generation(cl, replica, master_path):
@@ -81,7 +97,11 @@ def converge_and_record(cl, res, case, paths, timeout, replicas=None):
         note = ("active transactions left after the load: " + ", ".join(
             f"{r} {len(a)}" for r, v in bad.items() for a in v.values())) if bad else "no active transactions left"
         res.record(f"{case}: replica control files", "FAIL" if bad else "PASS", note=note, stale=summary)
-        ok = not bad
+        dup = duplicate_records(cl, paths, replicas)
+        note = ("more than one record: " + ", ".join(
+            f"{r} {ids}" for r, v in dup.items() for ids in v.values())) if dup else "one record per file"
+        res.record(f"{case}: replica records", "FAIL" if dup else "PASS", note=note, duplicates=dup)
+        ok = not bad and not dup
     return ok
 
 
