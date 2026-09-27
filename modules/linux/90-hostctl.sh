@@ -80,20 +80,22 @@ order by 1;")" || die "isql failed on $DB"
     sql="set heading off; set transaction read only ignore limbo;"
     first=1
     while IFS='|' read -r t k; do
-      t="$(echo "$t" | tr -d '[:space:]')"; [[ -n "$t" ]] || continue
+      # isql pads the column with spaces: strip both fields.
+      t="$(echo "$t" | tr -d '[:space:]')"; k="$(echo "$k" | tr -d '[:space:]')"; [[ -n "$t" ]] || continue
       [[ $first -eq 1 ]] && sql+=$'\nselect ' || sql+=$'\nunion all select '
       sql+="'RC|$t|$k|' || count(*) from \"$t\""
       first=0
     done <<<"$tables"
     [[ $first -eq 0 ]] || die "no user tables in $DB"
-    out="$(isql_q "$DB" "$sql;")" || die "count query failed on $DB"
+    out="$(isql_q "$DB" "$sql;
+commit;")" || die "count query failed on $DB"
     python3 -c '
 import json, sys
 rows = {}
 for line in sys.stdin.read().splitlines():
     line = line.strip()
     if line.startswith("RC|"):
-        _, t, k, n = line.split("|")
+        _, t, k, n = [f.strip() for f in line.split("|")]
         rows[t] = {"keyed": k == "K", "rows": int(n)}
 print("TBRESULT " + json.dumps(rows))' <<<"$out"
     ;;

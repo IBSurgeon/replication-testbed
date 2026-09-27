@@ -17,8 +17,29 @@
     "firebird_password": "<SYSDBA password>",
     "_fbagent_token": "Empty: tb.py generates one token per host and keeps it in state/state.json.",
     "fbagent_token": "",
+    "_firebird_initial_password": "Password the Firebird installer sets; 05-dbms changes it to firebird_password.",
+    "firebird_initial_password": "<installer default SYSDBA password>",
     "rcm_user": "<RCM operator user>",
     "rcm_password": "<RCM operator password>"
+  },
+
+  "firebird_installer": {
+    "_readme": "Used by 'hosts prepare' on Linux hosts without Firebird: an HQbird/Firebird installer script URL.",
+    "linux_url": "<https URL of the HQbird Linux installer script>"
+  },
+
+  "digitalocean": {
+    "_readme": "Optional: 'tb.py do create' makes one droplet per host and writes ssh/addr into this file. destroy deletes only droplets with 'tag'.",
+    "token_file": "<path to a file with the DigitalOcean API token>",
+    "region": "<region, e.g. nyc3>",
+    "size": "s-4vcpu-8gb",
+    "image": "ubuntu-24-04-x64",
+    "ssh_key_fingerprint": "<MD5 fingerprint of an ssh key registered in DigitalOcean>",
+    "vpc_uuid": "",
+    "tag": "replication-testbed",
+    "name_prefix": "tb",
+    "firewall_name": "replication-testbed",
+    "operator_ip": "auto"
   },
 
   "artifacts": {

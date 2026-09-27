@@ -5,6 +5,8 @@ Runs on the operator machine (Windows or Linux, Python 3.8+, OpenSSH client).
 Reads config/testbed.local.json (git-ignored), copies the module scripts to
 each host and runs them over ssh. See README.md.
 
+  tb.py do create|list|destroy [--yes]   (DigitalOcean hosts, optional)
+  tb.py hosts prepare [--hosts ...]       (packages + HQbird/Firebird on Linux hosts)
   tb.py check
   tb.py install   --source local|goafts [--hosts all|master|replicas|h1,h2] [--components ...] [--new-certs]
   tb.py uninstall --source local|goafts [--hosts ...] [--components ...] [--deregister] [--keep-work]
@@ -53,6 +55,57 @@ def cmd_check(cl, a):
         except (TbError, RemoteError) as e:
             bad += 1
             log(f"[{n}] FAILED: {e}")
+    return 1 if bad else 0
+
+
+def cmd_do(cl, a):
+    from tblib.digitalocean import DO
+    do = DO(cl.cfg)
+    if a.action == "create":
+        do.create()
+    elif a.action == "list":
+        do.list()
+    else:
+        if not a.yes:
+            do.list()
+            if input(f"Delete these droplets (tag {do.tag})? Type 'yes': ").strip() != "yes":
+                log("aborted")
+                return 1
+        do.destroy()
+    return 0
+
+
+def cmd_hosts(cl, a):
+    import base64
+    import threading
+    enc = lambda v: base64.b64encode(v.encode()).decode()
+    url = (cl.cfg.raw.get("firebird_installer") or {}).get("linux_url", "")
+    names = cl.cfg.select(a.hosts)
+    results = {}
+
+    def one(n):
+        h = cl.h(n)
+        if h["os"] == "linux":
+            args = {"installer_url_b64": enc(url), "root_b64": enc(h["firebird"]["root"])}
+            rc, res, _, _ = cl.module(n, "05-dbms", "install", args, check=False)
+        else:
+            args = {"fb_root": h["firebird"]["root"], "fb_service": h["firebird"]["service"],
+                    "port": h["firebird"]["port"]}
+            rc, res, _, _ = cl.module(n, "05-dbms", "check", args, check=False)
+        results[n] = (rc, res)
+
+    for n in names:
+        cl.ready(n)                      # sequential: ready() is not thread-safe
+    threads = [threading.Thread(target=one, args=(n,)) for n in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    bad = 0
+    for n in names:
+        rc, res = results.get(n, (1, None))
+        log(f"[{n}] {'ready' if rc == 0 else 'FAILED'} {res or ''}")
+        bad += rc != 0
     return 1 if bad else 0
 
 
@@ -144,6 +197,14 @@ def main():
     p.add_argument("--config", help="config file (default config/testbed.local.json or $TB_CONFIG)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    s = sub.add_parser("do", help="DigitalOcean droplets for the hosts")
+    s.add_argument("action", choices=["create", "list", "destroy"])
+    s.add_argument("--yes", action="store_true")
+
+    s = sub.add_parser("hosts", help="prepare hosts: packages, HQbird/Firebird, SYSDBA password")
+    s.add_argument("action", choices=["prepare"])
+    s.add_argument("--hosts", default="all")
+
     sub.add_parser("check", help="validate config, reach every host, detect Firebird")
 
     for name in ("install", "uninstall"):
@@ -198,6 +259,12 @@ def main():
         ts = tsub.add_parser(name, help=getattr(mod, "HELP", ""))
         mod.add_args(ts)
 
+    # Hosts print UTF-8; a Windows console (cp1252) must not crash on it.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     a = p.parse_args()
     if a.cmd == "load" and a.tag is None:
         a.tag = "load" if a.action == "start" else "all"
@@ -208,7 +275,7 @@ def main():
         return 0
     try:
         cl = Cluster(C.load(a.config))
-        handler = {"check": cmd_check, "install": cmd_install, "uninstall": cmd_uninstall,
+        handler = {"do": cmd_do, "hosts": cmd_hosts, "check": cmd_check, "install": cmd_install, "uninstall": cmd_uninstall,
                    "dbs": cmd_dbs, "loadgen": cmd_loadgen, "load": cmd_load, "verify": cmd_verify,
                    "status": cmd_status}.get(a.cmd)
         if handler:

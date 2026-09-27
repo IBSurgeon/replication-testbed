@@ -84,7 +84,10 @@ def stage_local_binaries(cl, name, comps):
         if not names.get(prod) or not os.path.isfile(p):
             raise TbError(f"artifact for {prod} ({h['os']}) not found: {p}")
         log(f"[{name}] upload {os.path.basename(p)}")
-        hst.put(p, hst.join(dest, cl.exe(name, prod)))
+        target = hst.join(dest, cl.exe(name, prod))
+        hst.put(p, target)
+        if h["os"] == "linux":
+            hst.run_raw(["chmod", "0755", target])     # scp from Windows drops the exec bit
 
 
 def pin_b64(pin):

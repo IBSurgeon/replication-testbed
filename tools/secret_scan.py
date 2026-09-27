@@ -29,6 +29,7 @@ PATTERNS = [
     ("masterkey", re.compile(r"(?i)\bmasterkey\b")),
 ]
 ALLOWED_IPS = {"0.0.0.0", "127.0.0.1"}
+GENERIC_USERS = {"root", "admin", "administrator", "ubuntu", "user", "firebird", "sysdba"}
 SKIP_SUFFIX = (".png", ".jpg", ".gif", ".ico", ".zip", ".exe")
 
 
@@ -55,13 +56,19 @@ def local_values():
             if len(v) >= 4 and "<" not in v and v.lower() not in ("sysdba", "local", "stable", "direct", "main"):
                 out.add(v)
                 if "@" in v:
-                    out.update(p for p in v.split("@") if len(p) >= 4)
+                    # user@host: the host always counts; the user only when
+                    # it is not a generic account name.
+                    user, _, hostpart = v.partition("@")
+                    out.add(hostpart)
+                    if len(user) >= 4 and user.lower() not in GENERIC_USERS:
+                        out.add(user)
 
     walk(cfg.get("secrets", {}), "password")
     walk(cfg.get("hosts", {}))
     walk(cfg.get("goafts", {}))
     walk(cfg.get("ssh", {}))
     walk(cfg.get("loadgen", {}))
+    walk(cfg.get("digitalocean", {}))
     walk(cfg.get("artifacts", {}).get("dir", ""), "dir")
     return out
 

@@ -82,7 +82,8 @@ class Cluster:
         s = self.cfg.secrets
         return {"TB_FB_USER": s.get("firebird_user", "SYSDBA"),
                 "TB_FB_PASSWORD": s.get("firebird_password", ""),
-                "TB_FBAGENT_TOKEN": self.fbagent_token(name)}
+                "TB_FBAGENT_TOKEN": self.fbagent_token(name),
+                "TB_FB_INITIAL_PASSWORD": s.get("firebird_initial_password", "")}
 
     def ready(self, name, force=False):
         """Copy modules and the secrets file to the host (once per run)."""
@@ -355,6 +356,10 @@ class Cluster:
         if mc is None:
             return False, dict(report, error="master count failed")
         ok = True
+        # Keyed tables must match. If none is keyed (a detection problem),
+        # compare every table rather than none.
+        strict = any(v["keyed"] for v in mc.values())
+        report["compared"] = "keyed tables" if strict else "all tables (no keyed table found)"
         for r in replicas:
             rp = self.replica_path(r, master_path)
             rc = self.counts(r, rp)
@@ -365,7 +370,7 @@ class Cluster:
                 continue
             for t, v in mc.items():
                 rv = rc.get(t, {}).get("rows")
-                if v["keyed"] and rv != v["rows"]:
+                if (v["keyed"] or not strict) and rv != v["rows"]:
                     diff[t] = {"master": v["rows"], "replica": rv}
             ok = ok and not diff
             report["replicas"][r] = {"path": rp, "diff": diff}

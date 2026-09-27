@@ -93,15 +93,15 @@ order by 1;
     foreach ($line in ($list -split "`n")) {
       $t = $line.Trim()
       if (-not $t.Contains("|")) { continue }
-      $name, $k = $t.Split("|")
+      $name, $k = $t.Split("|") | ForEach-Object { $_.Trim() }
       $parts += "select 'RC|$name|$k|' || count(*) from `"$name`""
     }
     if ($parts.Count -eq 0) { Die "no user tables in $db" }
-    $out = Isql $db ("set heading off; set transaction read only ignore limbo;`n" + ($parts -join "`nunion all ") + ";`n")
+    $out = Isql $db ("set heading off; set transaction read only ignore limbo;`n" + ($parts -join "`nunion all ") + ";`ncommit;`n")
     $rows = @{}
     foreach ($line in ($out -split "`n")) {
       $t = $line.Trim()
-      if ($t.StartsWith("RC|")) { $f = $t.Split("|"); $rows[$f[1]] = @{ keyed = ($f[2] -eq "K"); rows = [long]$f[3] } }
+      if ($t.StartsWith("RC|")) { $f = $t.Split("|") | ForEach-Object { $_.Trim() }; $rows[$f[1]] = @{ keyed = ($f[2] -eq "K"); rows = [long]$f[3] } }
     }
     Result $rows
   }
