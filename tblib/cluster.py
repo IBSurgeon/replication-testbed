@@ -220,12 +220,23 @@ class Cluster:
 
     def ensure_certs(self, force=False):
         out = C.state_path("certs", "ca.crt")
-        if os.path.exists(out) and not force:
-            return os.path.dirname(out)
         m = self.cfg.master
         hst = self.host(m)
         nodes = ",".join(f"{self.h(n)['node_id']}:{self.h(n)['role']}" for n in self.cfg.node_hosts())
         sans = ["localhost", "127.0.0.1"] + sorted({self.h(n)["addr"] for n in self.cfg.all_hosts()})
+        # Made for these nodes and addresses? New droplets get new addresses,
+        # and certificates made for the old ones fail every dial that checks
+        # the peer's address.
+        made_for = C.state_path("certs", "made-for.json")
+        want = {"nodes": nodes, "hosts": sans}
+        if os.path.exists(out) and not force:
+            try:
+                with open(made_for, encoding="utf-8") as f:
+                    if json.load(f) == want:
+                        return os.path.dirname(out)
+            except (OSError, ValueError):
+                pass
+            log("certificates were made for other nodes or addresses: making new ones")
         gen = hst.join(self.h(m)["paths"]["work"], "certs-gen")
         binp = hst.join(self.stage(m), "bin", self.exe(m, "hqclusternode"))
         log(f"gencerts on {m}: nodes={nodes}")
@@ -249,6 +260,8 @@ class Cluster:
         shutil.rmtree(local, ignore_errors=True)
         shutil.copytree(src, local)
         shutil.rmtree(tmp, ignore_errors=True)
+        with open(made_for, "w", encoding="utf-8") as f:
+            json.dump(want, f)
         # The CA key never stays on a host.
         if self.h(m)["os"] == "linux":
             hst.run_raw(["rm", "-rf", gen])
