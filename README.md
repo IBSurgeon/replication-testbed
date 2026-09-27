@@ -48,6 +48,7 @@ python tb.py loadgen deploy --from git       # build, copy to the master, 5 s sm
 python tb.py test basic
 python tb.py test reinit_cycles --cycles 10
 python tb.py test disasters
+python tb.py test datacheck
 python tb.py dbs remove
 python tb.py uninstall --source local        # fails with a list if anything is left
 python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on the hosts
@@ -65,6 +66,7 @@ python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on th
 | 6 | `10-local`, `20-goafts` | `install --hosts replicas` | replicas are installed the same way as the master |
 | 7 | test | `test reinit_cycles` | many reinits (nbackup -L on the master) under load, one or more databases, smooth and standard |
 | 8 | test | `test disasters` | node stop/kill, Firebird stop/restart, network partition, under load |
+| 9 | test | `test datacheck` | the node's periodic data check (N-09): history on every node, no mismatch under load, a match once quiet |
 | – | `90-hostctl` | used by tb.py and tests | node API calls, service control, row counts, limbo check, firewall block, replica control files |
 
 Details: [docs/modules.md](docs/modules.md). Tests: [docs/tests.md](docs/tests.md).

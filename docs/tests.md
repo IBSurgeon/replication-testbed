@@ -65,6 +65,27 @@ catch up. Each scenario restores the host in a `finally` block.
 python tb.py test disasters --only partition,replica-fb-stop --down 120
 ```
 
+## datacheck
+
+The node's periodic data check (hqcluster-node N-09). The test turns it on
+through `PUT /v1/config` on every node (interval `--interval`, default 60 s;
+quiet wait `--quiet`, default 30 s; the keyed tables as `sync_tables`) and
+restarts the nodes. It runs load for `--minutes` (default 4), stops, and
+waits for the rows to converge. Then:
+
+- every node has a history (`GET /v1/databases/{db_id}/datacheck`) with at
+  least one `ok` sample;
+- the master's comparisons hold no `mismatch`: a pair taken under load must
+  be `not_comparable`;
+- within `--match-timeout` (default 600 s) every replica has a `match`;
+- no `data_mismatch` alert on the master.
+
+At the end the check is turned off again and the nodes restarted.
+
+```bash
+python tb.py test datacheck --minutes 4
+```
+
 ## Not ported yet
 
 From `hqcluster-node/examples`, still to move here as test bed tests:
