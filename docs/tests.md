@@ -4,7 +4,7 @@
 `state/results/<test>-<time>/results.json` and `summary.md` and exits 0 only
 when every case passed.
 
-Every "converge" step has three checks. First the rows: every replica must
+Every "converge" step has four checks. First the rows: every replica must
 match the master (row counts of keyed tables). Then, once the rows match, the
 replica control files: with the load stopped, Firebird's control file
 (`{GUID}` in the replica's journal source folder) must hold no active
@@ -14,6 +14,10 @@ every segment after it, and Firebird replays it again after its next restart
 Last, the replica records: each replica must hold one record per database
 file in `GET /v1/databases` (hqcluster-node N-12: a scan before a reinit left
 a second record beside the reinit's).
+Then the applied segments the master sees: within 120 s its ledger
+(`GET /v1/transfer`) must show every replica's `last_applied` at its
+`last_acked`. The master learns it by polling the replica; a poll that fails
+(a certificate that does not match, 2026-09-27) leaves it behind for ever.
 
 ## basic
 

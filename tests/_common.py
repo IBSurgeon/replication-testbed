@@ -101,8 +101,31 @@ def converge_and_record(cl, res, case, paths, timeout, replicas=None):
         note = ("more than one record: " + ", ".join(
             f"{r} {ids}" for r, v in dup.items() for ids in v.values())) if dup else "one record per file"
         res.record(f"{case}: replica records", "FAIL" if dup else "PASS", note=note, duplicates=dup)
-        ok = not bad and not dup
+        lag = applied_behind(cl, paths, replicas)
+        note = ("the master sees less applied than acked: " + ", ".join(
+            f"{r['peer_id']} {r['last_applied']}/{r['last_acked']}" for r in lag)) if lag else "applied reaches acked"
+        res.record(f"{case}: applied seen by the master", "FAIL" if lag else "PASS", note=note, behind=lag)
+        ok = not bad and not dup and not lag
     return ok
+
+
+def applied_behind(cl, paths, replicas=None, timeout=120):
+    """With the load stopped and the rows equal, the master's ledger must show
+    every replica's applied segment at its acked one: it learns it by polling
+    the replica. A poll that fails leaves it behind for ever, and the master
+    then never frees the archive nor asks for a lost segment. Returns the
+    ledger rows still behind."""
+    want = {r["db_id"] for r in cl.test_dbs() if r["path"] in paths}
+    ids = {cl.h(r)["node_id"] for r in (replicas or cl.cfg.replicas)}
+    end = time.time() + timeout
+    while True:
+        lag = [{k: r.get(k) for k in ("db_id", "peer_id", "last_acked", "last_applied")}
+               for r in cl.transfer()
+               if r.get("db_id") in want and r.get("peer_id") in ids
+               and (r.get("last_applied") or 0) < (r.get("last_acked") or 0)]
+        if not lag or time.time() >= end:
+            return lag
+        time.sleep(10)
 
 
 def replica_control(cl, replica, master_path):
