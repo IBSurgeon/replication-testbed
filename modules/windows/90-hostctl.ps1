@@ -1,7 +1,7 @@
 # Module 90 (Windows): small host actions for tb.py and the tests.
 #
 #   90-hostctl.ps1 secure-file PATH
-#   90-hostctl.ps1 node-api     --node-dir DIR --method GET --path /v1/status [--body-b64 B64] [--timeout 60]
+#   90-hostctl.ps1 node-api     --node-dir DIR --method GET --path /v1/status [--body-b64 B64] [--timeout 60] [--addr HOST:PORT]
 #   90-hostctl.ps1 node-svc     --node-dir DIR --action stop|start|restart|kill
 #   90-hostctl.ps1 fb-svc       --fb-service NAME --action stop|start|restart|status
 #   90-hostctl.ps1 counts       --db FILE [--fb-root DIR] [--port 3050]
@@ -12,6 +12,14 @@
 #   90-hostctl.ps1 unblock-peer --addr ADDR [--port PORT]
 #   90-hostctl.ps1 tail         --path FILE [--lines 50]
 #   90-hostctl.ps1 replctl      --dir JOURNAL_SOURCE_DIR   (replica control files)
+#   90-hostctl.ps1 statelog     --node-dir DIR --db-id ID [--from LINE]
+#   90-hostctl.ps1 replog-inject --path REPLICATION_LOG --db FILE --message-b64 B64 [--role replica] [--level ERROR] [--count 1]
+#   90-hostctl.ps1 peer-push    --node-dir DIR --addr HOST:PORT --meta-b64 B64 [--file F | --random N]
+#   90-hostctl.ps1 node-on-file --node-dir DIR --path FILE --event locked|unlocked --action stop|kill [--timeout 900]
+#   90-hostctl.ps1 nbackup-unlock --db FILE [--fb-root DIR] [--port 3050]
+#   90-hostctl.ps1 db-new-guid  --db FILE --fb-service NAME [--fb-root DIR] [--port 3050]
+#   90-hostctl.ps1 rcm-api      --method GET --path /v1/alerts [--body-b64 B64] [--then-restart false]
+#   (the same commands as 90-hostctl.sh; see there what each one is for)
 . (Join-Path $PSScriptRoot "common.ps1")
 $TbName = "90-hostctl"
 
@@ -38,6 +46,7 @@ switch ($p.Cmd) {
     $exe = Join-Path $NodeDir "hqclusternode.exe"
     $a = @("api", (Arg $A "method" "GET"), (Arg $A "path" "/v1/status"), "-i", "-timeout-sec", (Arg $A "timeout" "60"),
            "-config", (Join-Path $NodeDir "node.json"), "-certs", (Join-Path $NodeDir "certs"))
+    if (Arg $A "addr") { $a += @("-addr", (Arg $A "addr")) }
     $tmp = ""
     if (Arg $A "body_b64") {
       $tmp = [IO.Path]::GetTempFileName()
@@ -164,5 +173,145 @@ order by 1;
     [Console]::Out.WriteLine("TBRESULT " + (ConvertTo-Json @($out) -Compress -Depth 5))
   }
 
-  default { Die "usage: 90-hostctl.ps1 secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl" }
+  "statelog" {
+    $path = Join-Path $NodeDir "journal.jsonl"
+    $dbid = Arg $A "db_id"
+    $from = [int](Arg $A "from" "0")
+    $lines = @()
+    if (Test-Path -LiteralPath $path) { $lines = [IO.File]::ReadAllLines($path) }
+    if ($from -lt 0) { Result @{ lines = $lines.Count; events = @() }; break }
+    if ($from -gt $lines.Count) { $from = 0 }
+    $ev = @()
+    for ($i = $from; $i -lt $lines.Count; $i++) {
+      $l = $lines[$i]
+      if (-not $l.Contains($dbid) -or -not ($l.Contains('"db_state"') -or $l.Contains('"reinit_step"'))) { continue }
+      try { $e = ConvertFrom-Json $l } catch { continue }
+      if ($e.db_id -ne $dbid) { continue }
+      $f = $e.fields
+      $ev += @{ ts = [string]$e.ts; type = $e.type; state = $f.state; reason = $f.reason; generation = $f.generation
+                phase = $f.phase; error = $f.error }
+    }
+    Result @{ lines = $lines.Count; events = @($ev) }
+  }
+
+  "replog-inject" {
+    $msg = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((Arg $A "message_b64")))
+    $role = Arg $A "role" "replica"
+    $level = Arg $A "level" "ERROR"
+    $text = ""
+    for ($i = 0; $i -lt [int](Arg $A "count" "1"); $i++) {
+      $stamp = (Get-Date).ToString("ddd MMM dd HH:mm:ss yyyy", [Globalization.CultureInfo]::InvariantCulture)
+      $text += "$env:COMPUTERNAME ($role) $stamp`r`n`tDatabase: $(Arg $A 'db')`r`n`t${level}: $msg`r`n`r`n"
+    }
+    [IO.File]::AppendAllText((Arg $A "path"), $text, (New-Object Text.UTF8Encoding($false)))
+    Result @{ path = (Arg $A "path"); blocks = [int](Arg $A "count" "1") }
+  }
+
+  "peer-push" {
+    $meta = ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((Arg $A "meta_b64"))))
+    if (Arg $A "file") { $body = [IO.File]::ReadAllBytes((Arg $A "file")) }
+    else { $n = [int](Arg $A "random" "4096"); if ($n -le 0) { $n = 4096 }; $body = New-Object byte[] $n; (New-Object Random).NextBytes($body) }
+    if (-not $meta.sha256 -or $meta.sha256 -eq "auto") {
+      $h = [Security.Cryptography.SHA256]::Create().ComputeHash($body)
+      $meta | Add-Member -Force -NotePropertyName sha256 -NotePropertyValue (($h | ForEach-Object { $_.ToString("x2") }) -join "")
+    }
+    if (-not $meta.uncompressed_size) { $meta | Add-Member -Force -NotePropertyName uncompressed_size -NotePropertyValue $body.Length }
+    if (-not $meta.compress) { $meta | Add-Member -Force -NotePropertyName compress -NotePropertyValue "none" }
+    $tmp = [IO.Path]::GetTempFileName()
+    [IO.File]::WriteAllBytes($tmp, $body)
+    # PS 5.1 does not escape inner quotes for a native program: do it here.
+    $hdr = "X-HQCluster-Segment: " + (ConvertTo-Json $meta -Compress)
+    $exe = Join-Path $NodeDir "hqclusternode.exe"
+    $a = @("api", "POST", "/v1/peer/segments", "-i", "-addr", (Arg $A "addr"), "-config", (Join-Path $NodeDir "node.json"),
+           "-certs", (Join-Path $NodeDir "certs"), "-body-file", $tmp, "-content-type", "application/octet-stream",
+           "-H", ('"' + $hdr.Replace('"', '\"') + '"'))
+    try { $r = Invoke-Native $exe $a -Quiet } finally { Remove-Item -LiteralPath $tmp -Force }
+    if ($r.Code -ne 0) { [Console]::Error.WriteLine($r.Out); Die "peer push failed (exit $($r.Code))" }
+    $out = ConvertFrom-Json (($r.Out -split "`r?`n") -join " ")
+    $out | Add-Member -Force -NotePropertyName meta -NotePropertyValue $meta
+    Result $out
+  }
+
+  "node-on-file" {
+    $f = Arg $A "path"
+    if (-not $f) { Die "--path is required" }
+    $evt = Arg $A "event" "locked"
+    $end = (Get-Date).AddSeconds([double](Arg $A "timeout" "900"))
+    $seen = $false; $fired = $false
+    while ((Get-Date) -lt $end) {
+      $ex = Test-Path -LiteralPath $f
+      if ($ex -and -not $seen) { $seen = $true; if ($evt -eq "locked") { $fired = $true; break } }
+      if ($seen -and -not $ex) { $fired = $true; break }
+      Start-Sleep -Milliseconds 20
+    }
+    if (-not $fired) { Die "no $evt event for $f" }
+    $exe = Join-Path $NodeDir "hqclusternode.exe"
+    switch (Arg $A "action" "stop") {
+      "stop" { Invoke-Native $exe @("svc", "stop", "-config", (Join-Path $NodeDir "node.json")) | Out-Null }
+      "kill" { Get-Process -Name "hqclusternode" -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force }
+      default { Die "--action stop|kill" }
+    }
+    Result @{ fired = $evt; action = (Arg $A "action" "stop"); delta_exists = (Test-Path -LiteralPath $f) }
+  }
+
+  "nbackup-unlock" {
+    Load-Secrets
+    $db = Arg $A "db"
+    Invoke-Native (Fb-Tool $FbRoot "nbackup") @("-N", "localhost/${Port}:$db") | Out-Null
+    Result @{ unlocked = $db; delta_left = (Test-Path -LiteralPath "$db.delta") }
+  }
+
+  "db-new-guid" {
+    Load-Secrets
+    $db = Arg $A "db"
+    $svc = Arg $A "fb_service"
+    if (-not (Test-Path -LiteralPath $db)) { Die "no database $db" }
+    if (-not $svc) { Die "--fb-service is required" }
+    $nb = Fb-Tool $FbRoot "nbackup"
+    $tmp = "$db.tbnewguid"
+    Invoke-Native $nb @("-L", "localhost/${Port}:$db") | Out-Null
+    $ok = $true
+    try { Copy-Item -LiteralPath $db -Destination $tmp -Force } catch { $ok = $false }
+    Invoke-Native $nb @("-N", "localhost/${Port}:$db") | Out-Null
+    if (-not $ok) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; Die "copy under nbackup lock failed" }
+    Invoke-Native $nb @("-F", $tmp) | Out-Null
+    Stop-Service -Name $svc -Force
+    Move-Item -LiteralPath $tmp -Destination $db -Force
+    Start-Service -Name $svc
+    Result @{ replaced = $db }
+  }
+
+  "rcm-api" {
+    if (Test-Path -LiteralPath $TbSecrets) {
+      foreach ($line in Get-Content -LiteralPath $TbSecrets) {
+        $eq = $line.IndexOf("=")
+        if ($eq -gt 0) { Set-Item -Path ("env:" + $line.Substring(0, $eq).Trim()) -Value $line.Substring($eq + 1) }
+      }
+    }
+    if (-not $env:TB_RCM_USER -or -not $env:TB_RCM_PASSWORD) { Die "TB_RCM_USER / TB_RCM_PASSWORD are not set (secrets rcm_user, rcm_password)" }
+    # .NET answers the Digest challenge by itself when it has a credential.
+    $req = [Net.HttpWebRequest]::Create("http://127.0.0.1:7444" + (Arg $A "path" "/v1/alerts"))
+    $req.Method = Arg $A "method" "GET"
+    $req.Accept = "application/json"
+    $req.Credentials = New-Object Net.NetworkCredential($env:TB_RCM_USER, $env:TB_RCM_PASSWORD)
+    $req.Timeout = 60000
+    if (Arg $A "body_b64") {
+      $bytes = [Convert]::FromBase64String((Arg $A "body_b64"))
+      $req.ContentType = "application/json"
+      $s = $req.GetRequestStream(); $s.Write($bytes, 0, $bytes.Length); $s.Close()
+    }
+    try { $resp = $req.GetResponse() } catch [Net.WebException] { $resp = $_.Exception.Response; if (-not $resp) { Die $_.Exception.Message } }
+    $st = [int]$resp.StatusCode
+    $raw = (New-Object IO.StreamReader($resp.GetResponseStream())).ReadToEnd()
+    $resp.Close()
+    if ((Arg $A "then_restart" "false") -eq "true") {
+      $rcm = Get-CimInstance Win32_Service | Where-Object { $_.PathName -and $_.PathName -match 'hqbirdrcm' } | Select-Object -First 1
+      if ($rcm) { Restart-Service -Name $rcm.Name -Force }
+    }
+    $b = $null
+    if ($raw) { try { $b = ConvertFrom-Json $raw } catch { $b = $raw.Substring(0, [Math]::Min(2000, $raw.Length)) } }
+    Result @{ status = $st; body = $b }
+  }
+
+  default { Die "usage: 90-hostctl.ps1 secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|db-new-guid|rcm-api" }
 }

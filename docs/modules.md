@@ -123,3 +123,14 @@ certs), `node-svc stop|start|restart|kill`, `fb-svc stop|start|restart|status`,
 (iptables on Linux, Windows Firewall rules on Windows), `tail`,
 `replctl --dir D` (Firebird's replica control files `{GUID}` in a journal
 source folder: applied position, `db_sequence`, active transactions).
+
+For the state machine tests: `statelog --db-id ID [--from LINE]` (state
+changes of one database from the node's `journal.jsonl`; `--from -1` gives
+the line count only), `replog-inject` (Firebird-format ERROR blocks appended
+to replication.log), `peer-push --addr HOST:PORT` (a segment to another
+node's `POST /v1/peer/segments`, with this node's certificate), `node-on-file`
+(stop or kill the node when a `.delta` lock file appears or goes away),
+`nbackup-unlock`, `db-new-guid` (the master file replaced by an nbackup copy
+with a new GUID), `rcm-api` (RCM operator API on 127.0.0.1:7444, Digest login
+from the secrets). `node-api --addr HOST:PORT` calls another node's API with
+this node's certificate.

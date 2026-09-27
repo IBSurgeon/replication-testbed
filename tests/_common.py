@@ -115,7 +115,7 @@ def applied_behind(cl, paths, replicas=None, timeout=120):
     the replica. A poll that fails leaves it behind for ever, and the master
     then never frees the archive nor asks for a lost segment. Returns the
     ledger rows still behind."""
-    want = {r["db_id"] for r in cl.test_dbs() if r["path"] in paths}
+    want = {r["db_id"] for r in cl.databases(cl.cfg.master) if r.get("path") in paths}
     ids = {cl.h(r)["node_id"] for r in (replicas or cl.cfg.replicas)}
     end = time.time() + timeout
     while True:

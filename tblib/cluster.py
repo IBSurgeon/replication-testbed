@@ -87,7 +87,11 @@ class Cluster:
         return {"TB_FB_USER": s.get("firebird_user", "SYSDBA"),
                 "TB_FB_PASSWORD": s.get("firebird_password", ""),
                 "TB_FBAGENT_TOKEN": self.fbagent_token(name),
-                "TB_FB_INITIAL_PASSWORD": s.get("firebird_initial_password", "")}
+                "TB_FB_INITIAL_PASSWORD": s.get("firebird_initial_password", ""),
+                # RCM operator login for the tests that use the RCM API; a
+                # placeholder left from the example file counts as not set.
+                "TB_RCM_USER": "" if s.get("rcm_user", "").startswith("<") else s.get("rcm_user", ""),
+                "TB_RCM_PASSWORD": "" if s.get("rcm_password", "").startswith("<") else s.get("rcm_password", "")}
 
     def ready(self, name, force=False):
         """Copy modules and the secrets file to the host (once per run)."""
@@ -148,9 +152,13 @@ class Cluster:
         return res if rc == 0 else None
 
     # --- node API ------------------------------------------------------------
-    def api(self, name, method, path, body=None, timeout=60, check_status=True):
-        """Call the node API on host `name`. Returns (status, body)."""
+    def api(self, name, method, path, body=None, timeout=60, check_status=True, addr=None):
+        """Call the node API on host `name`. Returns (status, body). With
+        addr ("host:port"), the call goes from `name` to that node instead,
+        with the certificate of `name`: how a peer route is reached."""
         args = {"method": method, "path": path, "timeout": timeout}
+        if addr:
+            args["addr"] = addr
         if body is not None:
             args["body_b64"] = b64(json.dumps(body))
         self.ready(name)
