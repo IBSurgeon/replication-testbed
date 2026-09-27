@@ -96,6 +96,66 @@ function Fb-Tool([string]$root, [string]$name) {
   return ""
 }
 
+# RemoteServicePort from firebird.conf; "" when it is not set (Firebird then
+# listens on 3050).
+function Fb-ConfPort([string]$root) {
+  $f = Join-Path $root "firebird.conf"
+  if (-not (Test-Path -LiteralPath $f)) { return "" }
+  $port = ""
+  foreach ($line in Get-Content -LiteralPath $f) {
+    if ($line -match '^\s*RemoteServicePort\s*=\s*(\d+)') { $port = $Matches[1] }
+  }
+  return $port
+}
+
+# Processes whose executable or command line is inside $dir, except this
+# script and its parents (their command lines name the folders).
+function Get-ProcessesUnder([string]$dir) {
+  $d = $dir.TrimEnd('\') + '\'
+  $skip = @{}
+  $q = [int]$PID
+  while ($q -and -not $skip.ContainsKey($q)) {
+    $skip[$q] = $true
+    $q = [int](Get-CimInstance Win32_Process -Filter "ProcessId=$q" -ErrorAction SilentlyContinue).ParentProcessId
+  }
+  return @(Get-CimInstance Win32_Process | Where-Object {
+      -not $skip.ContainsKey([int]$_.ProcessId) -and (
+        ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($d, [StringComparison]::OrdinalIgnoreCase)) -or
+        ($_.CommandLine -and $_.CommandLine.IndexOf($d, [StringComparison]::OrdinalIgnoreCase) -ge 0)) })
+}
+
+function Stop-ProcessesUnder([string]$dir) {
+  $ps = Get-ProcessesUnder $dir
+  if ($ps.Count -eq 0) { return }
+  Log ("stop processes in ${dir}: " + (($ps | ForEach-Object { "$($_.ProcessId) $($_.Name)" }) -join ", "))
+  foreach ($p in $ps) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+  Wait-Until 15 { (Get-ProcessesUnder $dir).Count -eq 0 } | Out-Null
+}
+
+# One line for each thing of $dir still on the host: the folder, a service
+# that runs from it, a process.
+function Leftovers-Of([string]$what, [string]$dir) {
+  $out = @()
+  if (Test-Path -LiteralPath $dir) { $out += "${what}: folder $dir" }
+  $d = $dir.TrimEnd('\') + '\'
+  foreach ($s in @(Get-CimInstance Win32_Service | Where-Object { $_.PathName -and $_.PathName.IndexOf($d, [StringComparison]::OrdinalIgnoreCase) -ge 0 })) {
+    $out += "${what}: service $($s.Name)"
+  }
+  foreach ($p in Get-ProcessesUnder $dir) { $out += "${what}: process $($p.ProcessId) $($p.Name)" }
+  return ,$out
+}
+
+# Leftover lines -> TBRESULT; exit 1 when any.
+function Report-Uninstall([string[]]$left) {
+  $left = @($left | Where-Object { $_ })
+  Result @{ uninstalled = ($left.Count -eq 0); leftovers = $left }
+  if ($left.Count -gt 0) {
+    Warn "still on the host after uninstall:"
+    foreach ($l in $left) { [Console]::Error.WriteLine("  $l") }
+    exit 1
+  }
+}
+
 function Wait-Until([int]$seconds, [scriptblock]$cond) {
   $end = (Get-Date).AddSeconds($seconds)
   while ((Get-Date) -lt $end) {

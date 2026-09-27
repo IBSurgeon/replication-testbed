@@ -8,6 +8,7 @@
 #                            [--fbagent-port 13050] [--fbagent-instance ID] [--fbagent-service HQbirdFBAgent]
 #                            [--node-dir C:\hqclusternode] [--db-root DIR] [--rcm-dir C:\hqbirdrcm]
 #   10-local.ps1 uninstall   --components fbagent,node,rcm [same dirs] [--restore-conf true|false]
+#   10-local.ps1 wipe        [same dirs]   (everything the test bed installed; checks what is left)
 #   10-local.ps1 fbagent-info --fbagent-dir DIR
 #
 # fbagent-mode existing: keep the fbagent that HQbird installed; only check it.
@@ -23,7 +24,7 @@ $FbPort = [int](Arg $A "fb_port" "3050")
 $FbService = Arg $A "fb_service"
 $FbaMode = Arg $A "fbagent_mode" "existing"
 $FbaDir = Arg $A "fbagent_dir" (Join-Path $TbWork "fbagent")
-$FbaPort = [int](Arg $A "fbagent_port" "13050")
+$FbaPort = [int](Arg $A "fbagent_port" "13055")
 $FbaInstance = Arg $A "fbagent_instance" ("tb-" + $env:COMPUTERNAME.ToLower() + "-" + $FbPort)
 $FbaService = Arg $A "fbagent_service" "HQbirdFBAgent"
 $NodeDir = Arg $A "node_dir" "C:\hqclusternode"
@@ -37,7 +38,10 @@ switch ($p.Cmd) {
     $isql = Fb-Tool $FbRoot "isql"
     $svcOk = $false
     if ($FbService) { $svcOk = [bool](Get-Service -Name $FbService -ErrorAction SilentlyContinue) }
-    Result @{ hostname = $env:COMPUTERNAME; fb_root_ok = [bool]$isql; fb_service = $FbService; fb_service_ok = $svcOk }
+    $ips = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" -ErrorAction SilentlyContinue |
+      ForEach-Object { $_.IPAddress } | Where-Object { $_ -and $_ -notmatch ':' })
+    Result @{ hostname = $env:COMPUTERNAME; hostname_full = [System.Net.Dns]::GetHostName(); ips = $ips
+              fb_conf_port = (Fb-ConfPort $FbRoot); fb_root_ok = [bool]$isql; fb_service = $FbService; fb_service_ok = $svcOk }
   }
 
   "install" {
@@ -63,12 +67,26 @@ switch ($p.Cmd) {
     Result @{ installed = $true }
   }
 
-  "uninstall" {
+  { $_ -in @("uninstall", "wipe") } {
+    # uninstall: the components asked for. wipe: everything the test bed puts
+    # on a host -- load processes, rcm, node, and an fbagent it installed (an
+    # 'existing' agent is kept). Both end by checking what is left.
+    $wipe = $p.Cmd -eq "wipe"
+    if ($wipe) {
+      $Components = "fbagent,node,rcm"
+      Stop-ProcessesUnder (Join-Path $TbWork "load")
+      Stop-ProcessesUnder (Join-Path $TbWork "loadgen")
+    }
     if (Has $Components "rcm") { Rcm-Uninstall $RcmDir }
     if (Has $Components "node") { Node-Uninstall $NodeDir }
     if ((Has $Components "fbagent") -and $FbaMode -eq "install") { Fbagent-Uninstall $FbaDir $FbaService }
     if ((Arg $A "restore_conf" "true") -eq "true") { Fb-RestorePristineConf $FbRoot $FbService }
-    Result @{ uninstalled = $true }
+    $left = @()
+    if (Has $Components "rcm") { $left += Leftovers-Of "rcm" $RcmDir }
+    if (Has $Components "node") { $left += Leftovers-Of "node" $NodeDir }
+    if ((Has $Components "fbagent") -and $FbaMode -eq "install") { $left += Fbagent-Leftovers $FbaDir $FbaService }
+    if ($wipe) { foreach ($x in Get-ProcessesUnder $TbWork) { $left += "work: process $($x.ProcessId) $($x.Name)" } }
+    Report-Uninstall $left
   }
 
   "fbagent-info" {
@@ -85,5 +103,5 @@ switch ($p.Cmd) {
     [Console]::Out.WriteLine("TBSECRET fbagent_token=$token")
   }
 
-  default { Die "usage: 10-local.ps1 detect|install|uninstall|fbagent-info [--key value ...]" }
+  default { Die "usage: 10-local.ps1 detect|install|uninstall|wipe|fbagent-info [--key value ...]" }
 }

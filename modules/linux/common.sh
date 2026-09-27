@@ -65,6 +65,13 @@ detect_fb_unit() {
   echo ""
 }
 
+# fb_conf_port ROOT -> RemoteServicePort from firebird.conf; '' when it is
+# not set (Firebird then listens on 3050).
+fb_conf_port() {
+  [[ -f "$1/firebird.conf" ]] || return 0
+  sed -nE 's/^[[:space:]]*RemoteServicePort[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$1/firebird.conf" | tail -n1
+}
+
 fb_tool() { # fb_tool ROOT NAME
   if [[ -x "$1/bin/$2" ]]; then echo "$1/bin/$2"; else echo "$1/$2"; fi
 }

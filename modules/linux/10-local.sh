@@ -10,6 +10,7 @@
 #                         [--node-dir /opt/hqclusternode] [--db-root DIR] [--node-user root]
 #                         [--rcm-dir /opt/hqbirdrcm]
 #   10-local.sh uninstall --components fbagent,node,rcm [same dirs] [--restore-conf true|false]
+#   10-local.sh wipe      [same dirs]   (everything the test bed installed; checks what is left)
 #   10-local.sh fbagent-info [--fbagent-dir DIR]
 #
 # The stage folder holds bin/, conf/, certs/, rcm-certs/ (see products.sh).
@@ -26,7 +27,7 @@ FB_PORT="$(arg fb_port 3050)"
 FB_UNIT="$(arg fb_service)"
 FBA_MODE="$(arg fbagent_mode install)"
 FBA_DIR="$(arg fbagent_dir /opt/hqbird-fbagent)"
-FBA_PORT="$(arg fbagent_port 13050)"
+FBA_PORT="$(arg fbagent_port 13055)"
 FBA_INSTANCE="$(arg fbagent_instance "tb-$(hostname -s)-$FB_PORT")"
 FBA_SERVICE="$(arg fbagent_service hqbirdfbagent)"
 NODE_DIR="$(arg node_dir /opt/hqclusternode)"
@@ -44,7 +45,8 @@ case "$CMD" in
     if [[ -x "$(fb_tool "$FB_ROOT" isql)" ]]; then
       ver="$("$(fb_tool "$FB_ROOT" isql)" -z </dev/null 2>/dev/null | head -n1 | tr -d '\r' || true)"
     fi
-    result "{\"hostname\":\"$(hostname -s)\",\"fb_unit\":\"$FB_UNIT\",\"fb_root_ok\":$([[ -x "$(fb_tool "$FB_ROOT" isql)" ]] && echo true || echo false),\"isql\":\"${ver//\"/}\",\"python3\":$(command -v python3 >/dev/null && echo true || echo false)}"
+    ips="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | sed 's/.*/"&"/' | paste -sd, - || true)"
+    result "{\"hostname\":\"$(hostname -s)\",\"hostname_full\":\"$(uname -n)\",\"ips\":[${ips}],\"fb_conf_port\":\"$(fb_conf_port "$FB_ROOT")\",\"fb_unit\":\"$FB_UNIT\",\"fb_root_ok\":$([[ -x "$(fb_tool "$FB_ROOT" isql)" ]] && echo true || echo false),\"isql\":\"${ver//\"/}\",\"python3\":$(command -v python3 >/dev/null && echo true || echo false)}"
     ;;
 
   install)
@@ -72,14 +74,39 @@ case "$CMD" in
     result '{"installed":true}'
     ;;
 
-  uninstall)
+  uninstall|wipe)
+    # uninstall: the components asked for. wipe: everything the test bed puts
+    # on a host -- load processes, tb-block firewall rules, rcm, node, and an
+    # fbagent it installed (an 'existing' agent is kept). Both end by checking
+    # what is left and fail when anything is.
+    if [[ "$CMD" == wipe ]]; then
+      COMPONENTS="fbagent,node,rcm"
+      kill_under "$TB_WORK/load"; kill_under "$TB_WORK/loadgen"
+      if command -v iptables >/dev/null; then
+        while rule="$(iptables -S 2>/dev/null | grep -m1 'tb-block')" && [[ -n "$rule" ]]; do
+          log "remove firewall rule: $rule"
+          eval "iptables ${rule/-A /-D }" || break
+        done
+      fi
+    fi
     if has "$COMPONENTS" rcm; then rcm_uninstall "$RCM_DIR"; fi
     if has "$COMPONENTS" node; then node_uninstall "$NODE_DIR"; fi
     if has "$COMPONENTS" fbagent && [[ "$FBA_MODE" == "install" ]]; then
-      fbagent_uninstall "$FBA_DIR" "$FBA_SERVICE"
+      fbagent_uninstall "$FBA_DIR" "$FBA_SERVICE" "$FB_PORT"
     fi
     if [[ "$(arg restore_conf true)" == "true" ]]; then fb_restore_pristine_conf "$FB_ROOT" "$FB_UNIT"; fi
-    result '{"uninstalled":true}'
+    {
+      if has "$COMPONENTS" rcm; then leftovers_of rcm "$RCM_DIR"; unit_exists hqbirdrcm && echo "rcm: unit hqbirdrcm.service"; fi
+      if has "$COMPONENTS" node; then leftovers_of node "$NODE_DIR"; fi
+      if has "$COMPONENTS" fbagent && [[ "$FBA_MODE" == "install" ]]; then
+        fbagent_leftovers "$FBA_DIR" "$FBA_SERVICE" "$FB_PORT"
+      fi
+      if [[ "$CMD" == wipe ]]; then
+        for p in $(pids_under "$TB_WORK"); do echo "work: process $p $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | cut -c1-120)"; done
+        iptables -S 2>/dev/null | grep tb-block | sed 's/^/firewall: /' || true
+      fi
+      true
+    } | report_uninstall
     ;;
 
   fbagent-info)
@@ -91,5 +118,5 @@ case "$CMD" in
     echo "TBSECRET fbagent_token=$(json_get "$cfg" local_api.token)"
     ;;
 
-  *) die "usage: 10-local.sh detect|install|uninstall|fbagent-info [--key value ...]" ;;
+  *) die "usage: 10-local.sh detect|install|uninstall|wipe|fbagent-info [--key value ...]" ;;
 esac

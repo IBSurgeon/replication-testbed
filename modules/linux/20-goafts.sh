@@ -34,7 +34,7 @@ FB_ROOT="$(arg fb_root /opt/firebird)"
 FB_PORT="$(arg fb_port 3050)"
 FB_UNIT="$(arg fb_service)"; [[ -n "$FB_UNIT" ]] || FB_UNIT="$(detect_fb_unit)"
 FBA_DIR="$(arg fbagent_dir /opt/hqbird-fbagent)"
-FBA_PORT="$(arg fbagent_port 13050)"
+FBA_PORT="$(arg fbagent_port 13055)"
 FBA_INSTANCE="$(arg fbagent_instance "tb-$(hostname -s)-$FB_PORT")"
 FBA_SERVICE="$(arg fbagent_service hqbirdfbagent)"
 NODE_DIR="$(arg node_dir /opt/hqclusternode)"
@@ -164,10 +164,15 @@ PY
     if has "$COMPONENTS" rcm; then rcm_uninstall "$RCM_DIR"; fi
     if has "$COMPONENTS" node; then node_uninstall "$NODE_DIR"; fi
     if has "$COMPONENTS" fbagent; then
-      fbagent_uninstall "$FBA_DIR" "$FBA_SERVICE"
+      fbagent_uninstall "$FBA_DIR" "$FBA_SERVICE" "$FB_PORT"
       fb_restore_pristine_conf "$FB_ROOT" "$FB_UNIT"
     fi
-    result '{"uninstalled":true}'
+    {
+      if has "$COMPONENTS" rcm; then leftovers_of rcm "$RCM_DIR"; unit_exists hqbirdrcm && echo "rcm: unit hqbirdrcm.service"; fi
+      if has "$COMPONENTS" node; then leftovers_of node "$NODE_DIR"; fi
+      if has "$COMPONENTS" fbagent; then fbagent_leftovers "$FBA_DIR" "$FBA_SERVICE" "$FB_PORT"; fi
+      true
+    } | report_uninstall
     ;;
 
   agent-id)

@@ -20,17 +20,20 @@ class ConfigError(Exception):
     pass
 
 
+# Port 0 means "find out on the host": the Firebird port from RemoteServicePort
+# in firebird.conf (3050 when not set), the fbagent port from local_api.listen
+# of an existing agent (13055, fbagent's own default, when not set).
 LINUX_DEFAULTS = {
-    "firebird": {"root": "/opt/firebird", "port": 3050, "service": ""},
-    "fbagent": {"mode": "install", "dir": "/opt/hqbird-fbagent", "port": 13050,
+    "firebird": {"root": "/opt/firebird", "port": 0, "service": ""},
+    "fbagent": {"mode": "install", "dir": "/opt/hqbird-fbagent", "port": 0,
                 "instance_id": "", "service": "hqbirdfbagent"},
     "paths": {"work": "/opt/hqtb", "node": "/opt/hqclusternode",
               "rcm": "/opt/hqbirdrcm", "db_root": ""},
 }
 
 WINDOWS_DEFAULTS = {
-    "firebird": {"root": "C:\\HQbird\\Firebird50", "port": 3050, "service": ""},
-    "fbagent": {"mode": "existing", "dir": "C:\\hqtb\\fbagent", "port": 13050,
+    "firebird": {"root": "C:\\HQbird\\Firebird50", "port": 0, "service": ""},
+    "fbagent": {"mode": "existing", "dir": "C:\\hqtb\\fbagent", "port": 0,
                 "instance_id": "", "service": "HQbirdFBAgent"},
     "paths": {"work": "C:\\hqtb", "node": "C:\\hqclusternode",
               "rcm": "C:\\hqbirdrcm", "db_root": ""},
@@ -103,8 +106,6 @@ class Config:
                 out["paths"]["db_root"] = f"/databases/{role}"
             else:
                 out["paths"]["db_root"] = out["paths"]["work"] + f"\\databases\\{role}"
-        if not out["fbagent"]["instance_id"]:
-            out["fbagent"]["instance_id"] = f"tb-{name}-{out['firebird']['port']}"
         out["sep"] = sep
         return out
 

@@ -11,7 +11,8 @@ import threading
 import time
 
 from . import config as C
-from .cluster import Cluster, TbError, log
+from .cluster import FB_PORT_DEFAULT as C_FB_PORT_DEFAULT
+from .cluster import FBAGENT_PORT_DEFAULT, Cluster, TbError, log
 
 
 # ------------------------------------------------------------------ helpers --
@@ -42,6 +43,16 @@ def detect(cl, name):
     if cl.h(name)["os"] == "linux" and not cl.h(name)["firebird"]["service"] and res.get("fb_unit"):
         st["fb_unit"] = res["fb_unit"]
     st["hostname"] = res.get("hostname", "")
+    st["hostname_full"] = res.get("hostname_full", "")
+    st["ips"] = [ip for ip in (res.get("ips") or []) if ip]
+    # Firebird port: firebird.conf (RemoteServicePort) says where Firebird
+    # listens. A port set in the config must agree with it.
+    conf_port = int(res.get("fb_conf_port") or 0) or C_FB_PORT_DEFAULT
+    set_port = int(cl.h(name)["firebird"].get("port") or 0)
+    if set_port and set_port != conf_port:
+        raise TbError(f"[{name}] hosts.{name}.firebird.port is {set_port}, but firebird.conf "
+                      f"says RemoteServicePort = {conf_port}; fix one of them")
+    st["fb_port"] = conf_port
     cl.save()
     if not res.get("fb_root_ok"):
         raise TbError(f"[{name}] no Firebird in {a['fb_root']}; install HQbird/Firebird first")
@@ -58,6 +69,17 @@ def adopt_existing_fbagent(cl, name):
     st["fbagent_token"] = tok
     if res and res.get("instance_id"):
         st["fbagent_instance"] = res["instance_id"]
+    # local_api.listen of the agent, else fbagent's own default (13055). A
+    # port set in the config must agree with it.
+    listen = str((res or {}).get("listen") or "")
+    port = int(listen.rsplit(":", 1)[1]) if ":" in listen and listen.rsplit(":", 1)[1].isdigit() \
+        else FBAGENT_PORT_DEFAULT
+    set_port = int(cl.h(name)["fbagent"].get("port") or 0)
+    if set_port and set_port != port:
+        raise TbError(f"[{name}] hosts.{name}.fbagent.port is {set_port}, but the existing agent "
+                      f"listens on {port} (local_api.listen = '{listen or 'not set'}')")
+    st["fbagent_port"] = port
+    log(f"[{name}] existing fbagent: local_api on 127.0.0.1:{port}")
     cl.save()
     cl.ready(name, force=True)
 
@@ -121,23 +143,92 @@ def admin_call(cl, method, path, body=None):
         return int(code or 0), text
 
 
-def approve_pending(cl, hostnames):
+def csr_expectations(cl, names, since):
+    """What a CSR of each enrolling host must look like to be approved.
+
+    A pending CSR has no agent id yet (goafts assigns it on approval); it has
+    the host name the agent sent (CN), the address it came from and when it
+    was made. All three must match, and only one request per host.
+    """
+    import ipaddress
+    import socket
+    out = {}
+    for n in names:
+        st, h = cl.hstate(n), cl.h(n)
+        hostnames = {x.lower() for x in (st.get("hostname"), st.get("hostname_full")) if x}
+        ips = set(st.get("ips") or [])
+        for v in (h.get("addr", ""), h.get("ssh", "").rpartition("@")[2]):
+            if not v or v == "local":
+                continue
+            try:
+                ips.add(str(ipaddress.ip_address(v)))
+            except ValueError:
+                try:
+                    ips.update(i[4][0] for i in socket.getaddrinfo(v, None))
+                except OSError:
+                    pass
+        out[n] = {"hostnames": hostnames, "ips": ips, "since": since}
+    return out
+
+
+def _csr_time(v):
+    import datetime
+    try:
+        t = datetime.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return t.timestamp() if t.tzinfo else None
+    except ValueError:
+        return None
+
+
+CSR_CLOCK_SLACK = 300      # seconds of clock difference between us and goafts
+
+
+def approve_pending(cl, expect, approved, warned):
+    """Approve the one pending CSR of each host in `expect` that matches it
+    exactly (host name, source address, made after enrollment began).
+    Anything unclear is left for a person, and said once."""
     r = admin_call(cl, "GET", "/v1/admin/csr-requests?status=pending")
     if not r or r[0] != 200:
         return 0
     items = r[1]
     if isinstance(items, dict):
         items = items.get("items") or items.get("requests") or items.get("csr_requests") or []
-    n = 0
+    by_host = {n: [] for n in expect}
     for it in items or []:
-        hn = str(it.get("hostname") or it.get("agent_id") or "").lower()
-        if any(hn.startswith(h.lower()) for h in hostnames if h):
-            rid = it.get("id") or it.get("request_id")
-            code, _ = admin_call(cl, "POST", f"/v1/admin/csr-requests/{rid}/approve",
+        hn = str(it.get("hostname") or "").lower()
+        for n, e in expect.items():
+            if n in approved or hn not in e["hostnames"]:
+                continue
+            rid = it.get("request_id") or it.get("id")
+            why = []
+            if str(it.get("source_ip") or "") not in e["ips"]:
+                why.append(f"source address {it.get('source_ip') or '?'} is not one of {sorted(e['ips'])}")
+            t = _csr_time(it.get("created_at"))
+            if t is None or t < e["since"] - CSR_CLOCK_SLACK:
+                why.append(f"made at {it.get('created_at') or '?'}, before this enrollment")
+            if why:
+                if rid not in warned:
+                    warned.add(rid)
+                    log(f"goafts: NOT approving CSR {rid} ({hn}) for {n}: " + "; ".join(why))
+                continue
+            by_host[n].append(rid)
+    n_ok = 0
+    for n, rids in by_host.items():
+        if len(rids) > 1:
+            key = "multi:" + n
+            if key not in warned:
+                warned.add(key)
+                log(f"goafts: {len(rids)} matching CSRs for {n} ({', '.join(map(str, rids))}); "
+                    f"approve the right one in the goafts admin panel")
+            continue
+        if len(rids) == 1:
+            code, _ = admin_call(cl, "POST", f"/v1/admin/csr-requests/{rids[0]}/approve",
                                  {"comment": "replication test bed auto-approve"})
-            log(f"goafts: approve CSR {rid} ({hn}) -> {code}")
-            n += 1
-    return n
+            log(f"goafts: approve CSR {rids[0]} for {n} -> {code}")
+            if code in (200, 201, 204):
+                approved.add(n)
+                n_ok += 1
+    return n_ok
 
 
 # ----------------------------------------------------------------- install --
@@ -190,7 +281,10 @@ def install(cl, source, hosts="all", only=None, new_certs=False):
                          "product_install": cfg.goafts.get("product_install", "direct"),
                          "channel": cfg.goafts.get("channel", "stable")})
             cl.module(n, "20-goafts", "install", args)
-        cl.hstate(n)["installed"] = {"source": source, "components": comps}
+        st = cl.hstate(n)
+        st["installed"] = {"source": source, "components": comps}
+        st["fb_port"] = cl.fb_port(n)
+        st["fbagent_port"] = cl.fbagent_port(n)
         cl.save()
     log("install done")
 
@@ -211,6 +305,8 @@ def enroll_goafts(cl, names):
     threads = [threading.Thread(target=run, args=(n,), daemon=True) for n in names]
     for n in names:
         cl.ready(n)                     # before threads: ready() is not thread-safe
+    expect = csr_expectations(cl, names, time.time())
+    approved, warned = set(), set()
     for t in threads:
         t.start()
     hostnames = [cl.hstate(n).get("hostname", "") for n in names]
@@ -222,7 +318,7 @@ def enroll_goafts(cl, names):
     while any(t.is_alive() for t in threads):
         if g.get("admin", {}).get("url"):
             try:
-                approve_pending(cl, hostnames)
+                approve_pending(cl, expect, approved, warned)
             except Exception as e:  # noqa: BLE001
                 log(f"goafts: approve failed: {e}")
         time.sleep(5)
@@ -234,6 +330,7 @@ def enroll_goafts(cl, names):
 def uninstall(cl, source, hosts="all", only=None, deregister=False, keep_work=False):
     cfg = cl.cfg
     names = list(reversed(install_order(cl, cfg.select(hosts))))
+    left = []
     for n in names:
         comps = components_of(cl, n, only)
         if not comps:
@@ -249,12 +346,52 @@ def uninstall(cl, source, hosts="all", only=None, deregister=False, keep_work=Fa
         if n == cfg.master:
             cl.load_stop()
         script = "10-local" if source == "local" else "20-goafts"
-        cl.module(n, script, "uninstall", args, check=False)
-        cl.hstate(n).pop("installed", None)
+        rc, res, _, _ = cl.module(n, script, "uninstall", args, check=False)
+        if not note_leftovers(n, rc, res, left):
+            cl.hstate(n).pop("installed", None)
         cl.save()
         if not keep_work:
             remove_work(cl, n)
-    log("uninstall done")
+    finish_removal("uninstall", left)
+
+
+def note_leftovers(n, rc, res, left):
+    """Record what a removal left on host n. True when something is left."""
+    items = list((res or {}).get("leftovers") or [])
+    if rc != 0 and not items:
+        items = [f"the module failed (exit {rc}) before it could check"]
+    for i in items:
+        left.append(f"[{n}] {i}")
+    return bool(items)
+
+
+def finish_removal(what, left):
+    if left:
+        raise TbError(f"{what}: {len(left)} thing(s) are still on the hosts:\n  " + "\n  ".join(left)
+                      + "\nRun 'tb.py hosts wipe --hosts <host> --yes' to remove what the test bed put there.")
+    log(f"{what} done: nothing left")
+
+
+def wipe(cl, hosts):
+    """Remove everything the test bed put on the hosts, whatever was
+    installed, and check that nothing is left. An 'existing' fbagent stays."""
+    names = list(reversed(install_order(cl, cl.cfg.select(hosts))))
+    left = []
+    for n in names:
+        rc, res, _, _ = cl.module(n, "10-local", "wipe", cl.base_args(n), check=False)
+        if not note_leftovers(n, rc, res, left):
+            cl.hstate(n).pop("installed", None)
+        cl.save()
+        remove_work(cl, n)
+        w = cl.h(n)["paths"]["work"]
+        if cl.h(n)["os"] == "linux":
+            rc2, out, _ = cl.host(n).run_raw(["test", "-e", w], check=False)
+        else:
+            rc2, out, _ = cl.host(n).run_raw(["powershell", "-NoProfile", "-Command",
+                                              f"if (Test-Path '{w}') {{ exit 0 }} else {{ exit 1 }}"], check=False)
+        if rc2 == 0:
+            left.append(f"[{n}] work: folder {w}")
+    finish_removal("wipe", left)
 
 
 def remove_work(cl, n):
@@ -434,5 +571,5 @@ def loadgen_deploy(cl, source, target="master", path=None, smoke=True):
         if not dbs:
             log("no test databases yet: smoke skipped (run 'dbs prepare' and 'loadgen smoke')")
         else:
-            cl.module(m, "40-loadgen", "smoke", {"db": dbs[0]["path"], "port": mh["firebird"]["port"]})
+            cl.module(m, "40-loadgen", "smoke", {"db": dbs[0]["path"], "port": cl.fb_port(m)})
     return binp

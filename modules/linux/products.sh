@@ -115,8 +115,115 @@ fbagent_install_local() { # STAGE DIR FB_ROOT FB_PORT FB_UNIT API_PORT INSTANCE 
   fbagent_check "$6" "$7" "$4"
 }
 
-fbagent_uninstall() { # DIR SERVICE
-  local dir="$1"
+# ------------------------------------------------------------ processes --
+# pids_under DIR: processes whose executable or command line is inside DIR,
+# except this script, its subshells and its parents (their command lines name
+# the folders).
+pids_under() {
+  local dir="${1%/}/" skip=" " q=$BASHPID p pid exe cmd own
+  own="$(tr '\0' ' ' <"/proc/$$/cmdline" 2>/dev/null || true)"
+  while [[ -n "$q" && "$q" != 0 && "$skip" != *" $q "* ]]; do
+    skip+="$q "; q="$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' ' || true)"
+  done
+  for p in /proc/[0-9]*; do
+    pid="${p#/proc/}"
+    [[ "$skip" == *" $pid "* ]] && continue
+    exe="$(readlink "$p/exe" 2>/dev/null || true)"
+    cmd="$(tr '\0' ' ' <"$p/cmdline" 2>/dev/null || true)"
+    [[ -n "$own" && "$cmd" == "$own" ]] && continue
+    if [[ "$exe" == "$dir"* || "$cmd" == *"$dir"* ]]; then echo "$pid"; fi
+  done
+  return 0
+}
+
+# kill_under DIR: TERM, then KILL after 10 s, every process pids_under finds.
+kill_under() {
+  local pids i
+  pids="$(pids_under "$1" | xargs)"
+  [[ -n "$pids" ]] || return 0
+  log "stop processes in $1: $pids"
+  kill $pids 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    pids="$(pids_under "$1" | xargs)"
+    [[ -n "$pids" ]] || return 0
+    sleep 1
+  done
+  kill -9 $pids 2>/dev/null || true
+}
+
+# leftovers_of WHAT DIR: one line for each thing of DIR still on the host
+# (the folder, a systemd unit that runs from it, a process).
+leftovers_of() {
+  local what="$1" dir="${2%/}" u p
+  [[ -e "$dir" ]] && echo "$what: folder $dir"
+  for u in /etc/systemd/system/*.service /lib/systemd/system/*.service; do
+    [[ -f "$u" ]] && grep -q "$dir/" "$u" && echo "$what: unit $u"
+  done
+  for p in $(pids_under "$dir"); do
+    echo "$what: process $p $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | cut -c1-120)"
+  done
+  return 0
+}
+
+# report_uninstall: leftover lines on stdin -> TBRESULT; exit 1 when any.
+report_uninstall() {
+  local left
+  left="$(grep -v '^[[:space:]]*$' || true)"
+  LEFT="$left" python3 -c 'import json, os
+l = [x for x in os.environ["LEFT"].splitlines() if x.strip()]
+print("TBRESULT " + json.dumps({"uninstalled": not l, "leftovers": l}))'
+  if [[ -n "$left" ]]; then
+    warn "still on the host after uninstall:"
+    echo "$left" >&2
+    exit 1
+  fi
+}
+
+# ------------------------------------------------------- fbagent removal --
+# fbagent_ids DIR: ids the agent uses (agent.id, goafts.agent_id,
+# local_api.instance_id). hqmonitor data and trace session names use them.
+fbagent_ids() {
+  python3 - "$1/agent_config.json" <<'PY'
+import json, sys
+try:
+    c = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+ids = {str((c.get("agent") or {}).get("id") or ""),
+       str((c.get("goafts") or {}).get("agent_id") or ""),
+       str((c.get("local_api") or {}).get("instance_id") or "")}
+print("\n".join(sorted(i for i in ids if i and "/" not in i and i not in (".", ".."))))
+PY
+}
+
+# fbagent_backups DIR: update backup folders fbagent leaves on a self-update.
+fbagent_backups() {
+  local dir="${1%/}"
+  find "$dir" "$(dirname "$dir")" -maxdepth 2 -name 'fbagent-update-backup*' 2>/dev/null | sort -u || true
+}
+
+# fbagent_traces PORT IDS...: "id name" of the trace sessions this agent
+# started (named FBAgent-<agent id>...). Needs the Firebird password.
+fbagent_traces() {
+  local port="$1"; shift
+  [[ $# -gt 0 ]] || return 0
+  (
+    load_secrets >/dev/null 2>&1 || exit 0
+    "$(fb_tool "$FB_ROOT" fbtracemgr)" -se "localhost/$port:service_mgr" -list 2>/dev/null \
+      | awk '/Session ID:/ {id=$3} /name:/ {print id, $2}' \
+      | while read -r id name; do
+          for i in "$@"; do [[ "$name" == "FBAgent-$i"* ]] && { echo "$id $name"; break; }; done
+        done || true
+  ) || true
+}
+
+# The ids of the removed agent, for fbagent_leftovers.
+FBA_REMOVED_IDS=""
+
+fbagent_uninstall() { # DIR SERVICE [FB_PORT]
+  local dir="${1%/}" port="${3:-3050}" ids b id name
+  ids="$(fbagent_ids "$dir" | xargs)"
+  FBA_REMOVED_IDS="$ids"
   if [[ -x "$dir/fbagent" ]]; then
     systemctl stop "$2" 2>/dev/null || true
     (cd "$dir" && ./fbagent --uninstall) || warn "fbagent --uninstall failed"
@@ -132,8 +239,39 @@ fbagent_uninstall() { # DIR SERVICE
     rm -f "$u"
   done
   systemctl daemon-reload
+  # Children outlive the service: fbtracemgr for the agent's trace sessions,
+  # hqmonitor, an update helper.
+  kill_under "$dir"
+  fbagent_traces "$port" $ids | while read -r id name; do
+    log "stop trace session $id ($name)"
+    ( load_secrets >/dev/null 2>&1 && "$(fb_tool "$FB_ROOT" fbtracemgr)" -se "localhost/$port:service_mgr" -stop -id "$id" ) || true
+  done || true
+  for id in $ids; do
+    if [[ -e "/var/lib/hqmonitor/$id" ]]; then log "remove /var/lib/hqmonitor/$id"; rm -rf "/var/lib/hqmonitor/$id"; fi
+  done
+  rmdir /var/lib/hqmonitor 2>/dev/null || true
+  # A backup outside DIR is removed only when it is this agent's (same ids).
+  while read -r b; do
+    [[ -n "$b" ]] || continue
+    if [[ "$b" == "$dir/"* ]] || fbagent_ids "$b" | grep -qxF -f <(tr ' ' '\n' <<<"$ids" | grep -v '^$'); then
+      log "remove $b"; rm -rf "$b"
+    fi
+  done < <(fbagent_backups "$dir")
   rm -rf "$dir"
   log "fbagent removed from $dir"
+}
+
+# fbagent_leftovers DIR SERVICE [FB_PORT]: what the removed agent left.
+fbagent_leftovers() {
+  local dir="${1%/}" port="${3:-3050}" id b
+  leftovers_of fbagent "$dir"
+  unit_exists "$2" && echo "fbagent: unit $2.service"
+  for id in $FBA_REMOVED_IDS; do
+    [[ -e "/var/lib/hqmonitor/$id" ]] && echo "fbagent: folder /var/lib/hqmonitor/$id"
+  done
+  while read -r b; do [[ -n "$b" ]] && echo "fbagent: update backup $b"; done < <(fbagent_backups "$dir")
+  fbagent_traces "$port" $FBA_REMOVED_IDS | while read -r id b; do echo "fbagent: trace session $id $b"; done || true
+  return 0
 }
 
 # ----------------------------------------------------------- hqclusternode --
@@ -175,6 +313,7 @@ node_uninstall() { # NODE_DIR
     fi
   done
   systemctl daemon-reload
+  kill_under "$dir"
   rm -rf "$dir"
   log "node removed from $dir"
 }
@@ -212,6 +351,7 @@ rcm_uninstall() { # RCM_DIR
     rm -f /etc/systemd/system/hqbirdrcm.service
   fi
   systemctl daemon-reload
+  kill_under "$dir"
   rm -rf "$dir"
   log "rcm removed from $dir"
 }

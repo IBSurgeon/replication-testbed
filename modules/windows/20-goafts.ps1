@@ -30,7 +30,7 @@ $FbRoot = Arg $A "fb_root" "C:\HQbird\Firebird50"
 $FbPort = [int](Arg $A "fb_port" "3050")
 $FbService = Arg $A "fb_service"
 $FbaDir = Arg $A "fbagent_dir" "C:\Program Files\HQbird FBAgent"
-$FbaPort = [int](Arg $A "fbagent_port" "13050")
+$FbaPort = [int](Arg $A "fbagent_port" "13055")
 $FbaInstance = Arg $A "fbagent_instance" ("tb-" + $env:COMPUTERNAME.ToLower() + "-" + $FbPort)
 $FbaService = Arg $A "fbagent_service" "HQbirdFBAgent"
 $NodeDir = Arg $A "node_dir" "C:\hqclusternode"
@@ -161,7 +161,11 @@ switch ($p.Cmd) {
       Fbagent-Uninstall $FbaDir $FbaService
       Fb-RestorePristineConf $FbRoot $FbService
     }
-    Result @{ uninstalled = $true }
+    $left = @()
+    if (Has $Components "rcm") { $left += Leftovers-Of "rcm" $RcmDir }
+    if (Has $Components "node") { $left += Leftovers-Of "node" $NodeDir }
+    if (Has $Components "fbagent") { $left += Fbagent-Leftovers $FbaDir $FbaService }
+    Report-Uninstall $left
   }
 
   "agent-id" {

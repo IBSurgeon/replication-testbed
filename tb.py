@@ -7,6 +7,7 @@ each host and runs them over ssh. See README.md.
 
   tb.py do create|list|destroy [--yes]   (DigitalOcean hosts, optional)
   tb.py hosts prepare [--hosts ...]       (packages + HQbird/Firebird on Linux hosts)
+  tb.py hosts wipe [--hosts ...] --yes    (remove all the test bed put on the hosts; check nothing is left)
   tb.py check
   tb.py install   --source local|goafts [--hosts all|master|replicas|h1,h2] [--components ...] [--new-certs]
   tb.py uninstall --source local|goafts [--hosts ...] [--components ...] [--deregister] [--keep-work]
@@ -76,6 +77,13 @@ def cmd_do(cl, a):
 
 
 def cmd_hosts(cl, a):
+    if a.action == "wipe":
+        if not a.yes:
+            log("hosts wipe removes rcm, node, a test bed fbagent, load processes and the work folder "
+                f"from: {', '.join(cl.cfg.select(a.hosts))}. Add --yes to do it.")
+            return 1
+        ops.wipe(cl, a.hosts)
+        return 0
     import base64
     import threading
     enc = lambda v: base64.b64encode(v.encode()).decode()
@@ -90,7 +98,7 @@ def cmd_hosts(cl, a):
             rc, res, _, _ = cl.module(n, "05-dbms", "install", args, check=False)
         else:
             args = {"fb_root": h["firebird"]["root"], "fb_service": h["firebird"]["service"],
-                    "port": h["firebird"]["port"]}
+                    "port": cl.fb_port(n)}
             rc, res, _, _ = cl.module(n, "05-dbms", "check", args, check=False)
         results[n] = (rc, res)
 
@@ -140,7 +148,7 @@ def cmd_loadgen(cl, a):
         if not dbs:
             raise TbError("no test databases (run 'dbs prepare')")
         m = cl.cfg.master
-        cl.module(m, "40-loadgen", "smoke", {"db": dbs[0]["path"], "port": cl.h(m)["firebird"]["port"]})
+        cl.module(m, "40-loadgen", "smoke", {"db": dbs[0]["path"], "port": cl.fb_port(m)})
     return 0
 
 
@@ -202,8 +210,9 @@ def main():
     s.add_argument("--yes", action="store_true")
 
     s = sub.add_parser("hosts", help="prepare hosts: packages, HQbird/Firebird, SYSDBA password")
-    s.add_argument("action", choices=["prepare"])
+    s.add_argument("action", choices=["prepare", "wipe"])
     s.add_argument("--hosts", default="all")
+    s.add_argument("--yes", action="store_true", help="wipe: really remove")
 
     sub.add_parser("check", help="validate config, reach every host, detect Firebird")
 

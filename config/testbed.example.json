@@ -58,7 +58,7 @@
     "product_install": "direct",
     "enroll_timeout": "30m",
     "admin": {
-      "_readme": "Optional. When set, tb.py approves the CSR of each host and can deregister agents on uninstall.",
+      "_readme": "Optional. When set, tb.py approves the CSR of each host (exact host name, the host's address, one request per host) and can deregister agents on uninstall.",
       "url": "",
       "client_cert": "",
       "client_key": "",
@@ -103,8 +103,9 @@
       "addr": "<master-address>",
       "node_id": "tb-master",
       "node_port": 7051,
-      "firebird": { "root": "", "port": 3050, "service": "" },
-      "fbagent": { "mode": "install", "dir": "", "port": 13050, "instance_id": "", "service": "" },
+      "_ports": "firebird.port / fbagent.port: 0 = from the host (RemoteServicePort in firebird.conf, else 3050; local_api.listen of an existing agent, else 13055).",
+      "firebird": { "root": "", "port": 0, "service": "" },
+      "fbagent": { "mode": "install", "dir": "", "port": 0, "instance_id": "", "service": "" },
       "paths": { "work": "", "node": "", "rcm": "", "db_root": "" }
     },
     "replica1": {
@@ -115,8 +116,9 @@
       "addr": "<replica1-address>",
       "node_id": "tb-replica1",
       "node_port": 7052,
-      "firebird": { "root": "", "port": 3050, "service": "" },
-      "fbagent": { "mode": "install", "dir": "", "port": 13050, "instance_id": "", "service": "" },
+      "_ports": "firebird.port / fbagent.port: 0 = from the host (RemoteServicePort in firebird.conf, else 3050; local_api.listen of an existing agent, else 13055).",
+      "firebird": { "root": "", "port": 0, "service": "" },
+      "fbagent": { "mode": "install", "dir": "", "port": 0, "instance_id": "", "service": "" },
       "paths": { "work": "", "node": "", "rcm": "", "db_root": "" }
     },
     "replica2": {
@@ -127,8 +129,8 @@
       "addr": "<replica2-address>",
       "node_id": "tb-replica2",
       "node_port": 7052,
-      "firebird": { "root": "C:\\HQbird\\Firebird50", "port": 3050, "service": "<Firebird Windows service name>" },
-      "fbagent": { "mode": "existing", "dir": "<fbagent folder>", "port": 13050, "instance_id": "", "service": "" },
+      "firebird": { "root": "C:\\HQbird\\Firebird50", "port": 0, "service": "<Firebird Windows service name>" },
+      "fbagent": { "mode": "existing", "dir": "<fbagent folder>", "port": 0, "instance_id": "", "service": "" },
       "paths": { "work": "", "node": "", "rcm": "", "db_root": "" }
     }
   },

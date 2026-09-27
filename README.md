@@ -49,7 +49,8 @@ python tb.py test basic
 python tb.py test reinit_cycles --cycles 10
 python tb.py test disasters
 python tb.py dbs remove
-python tb.py uninstall --source local
+python tb.py uninstall --source local        # fails with a list if anything is left
+python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on the hosts
 ```
 
 ## Modules and commands

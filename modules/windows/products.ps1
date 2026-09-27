@@ -97,7 +97,31 @@ function Fbagent-InstallLocal([string]$stage, [string]$dir, [string]$fbRoot, [in
   if (-not (Wait-Until 60 { Fbagent-Check $apiPort $instance $fbPort })) { Die "fbagent local_api does not answer on 127.0.0.1:$apiPort" }
 }
 
+# Ids the agent uses (agent.id, goafts.agent_id, local_api.instance_id).
+function Fbagent-Ids([string]$dir) {
+  $f = Join-Path $dir "agent_config.json"
+  if (-not (Test-Path -LiteralPath $f)) { return @() }
+  try { $c = Read-Json $f } catch { return @() }
+  return @(@([string]$c.agent.id, [string]$c.goafts.agent_id, [string]$c.local_api.instance_id) |
+    Where-Object { $_ } | Sort-Object -Unique)
+}
+
+# Update backup folders fbagent leaves on a self-update, in $dir or next to it.
+function Fbagent-Backups([string]$dir) {
+  $parent = Split-Path -Parent $dir
+  $found = @()
+  foreach ($base in @($dir, $parent)) {
+    if (-not (Test-Path -LiteralPath $base)) { continue }
+    $found += @(Get-ChildItem -LiteralPath $base -Directory -Filter "fbagent-update-backup*" -ErrorAction SilentlyContinue)
+    foreach ($sub in @(Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue)) {
+      $found += @(Get-ChildItem -LiteralPath $sub.FullName -Directory -Filter "fbagent-update-backup*" -ErrorAction SilentlyContinue)
+    }
+  }
+  return @($found | ForEach-Object { $_.FullName } | Sort-Object -Unique)
+}
+
 function Fbagent-Uninstall([string]$dir, [string]$service) {
+  $ids = Fbagent-Ids $dir
   $exe = Join-Path $dir "fbagent.exe"
   if (Test-Path -LiteralPath $exe) {
     Push-Location $dir
@@ -116,9 +140,27 @@ function Fbagent-Uninstall([string]$dir, [string]$service) {
     $p = (Get-CimInstance Win32_Service -Filter "Name='$($m.Name)'").PathName
     if ($p -like "*$dir*") { Stop-Service -Name $m.Name -Force -ErrorAction SilentlyContinue; & sc.exe delete $m.Name | Out-Null }
   }
-  Start-Sleep -Seconds 2
-  if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+  # Children outlive the service: fbtracemgr for the agent's trace sessions,
+  # hqmonitor, an update helper.
+  Stop-ProcessesUnder $dir
+  # A backup outside $dir is removed only when it is this agent's (same ids).
+  foreach ($b in Fbagent-Backups $dir) {
+    $mine = $b.StartsWith($dir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)
+    if (-not $mine) { $mine = @(Fbagent-Ids $b | Where-Object { $ids -contains $_ }).Count -gt 0 }
+    if ($mine) { Log "remove $b"; Remove-Item -LiteralPath $b -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+  if (Test-Path -LiteralPath $dir) {
+    try { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop } catch { Warn "cannot remove ${dir}: $_" }
+  }
   Log "fbagent removed from $dir"
+}
+
+# What the removed agent left.
+function Fbagent-Leftovers([string]$dir, [string]$service) {
+  $out = @(Leftovers-Of "fbagent" $dir)
+  if (Get-Service -Name $service -ErrorAction SilentlyContinue) { $out += "fbagent: service $service" }
+  foreach ($b in Fbagent-Backups $dir) { $out += "fbagent: update backup $b" }
+  return ,$out
 }
 
 # ----------------------------------------------------------- hqclusternode --
@@ -158,7 +200,10 @@ function Node-Uninstall([string]$dir) {
     if ($r.Code -ne 0) { Warn "svc uninstall failed" }
   }
   Start-Sleep -Seconds 2
-  if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+  Stop-ProcessesUnder $dir
+  if (Test-Path -LiteralPath $dir) {
+    try { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop } catch { Warn "cannot remove ${dir}: $_" }
+  }
   Log "node removed from $dir"
 }
 
@@ -194,6 +239,9 @@ function Rcm-Uninstall([string]$dir) {
     if ((Invoke-Native $exe @("svc", "uninstall", "-config", $cfg)).Code -ne 0) { Warn "rcm svc uninstall failed" }
   }
   Start-Sleep -Seconds 2
-  if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+  Stop-ProcessesUnder $dir
+  if (Test-Path -LiteralPath $dir) {
+    try { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop } catch { Warn "cannot remove ${dir}: $_" }
+  }
   Log "rcm removed from $dir"
 }

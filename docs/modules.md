@@ -37,9 +37,10 @@ CA key is kept only in `state/certs/` on the operator machine.
 
 | Command | Does |
 |---|---|
-| `detect` | Firebird root, Firebird systemd unit (Linux), hostname. Changes nothing |
+| `detect` | Firebird root, Firebird systemd unit (Linux), host name, IP addresses, `RemoteServicePort` from `firebird.conf`. Changes nothing |
 | `install --components fbagent,node,rcm` | fbagent (`--fbagent-mode install`: new agent with `local_api` only; `existing`: check the agent HQbird installed), node service (`hqclusternode svc install`), RCM service (`hqbirdrcm svc install`) |
-| `uninstall --components ...` | stops and removes the services and folders; restores the `replication.conf` saved before the first install and restarts Firebird |
+| `uninstall --components ...` | stops and removes the services and folders, stops the processes still running from them (fbtracemgr, hqmonitor, ...), removes fbagent's `/var/lib/hqmonitor/<id>`, its update backups and its trace sessions; restores the `replication.conf` saved before the first install and restarts Firebird. Then checks what is left and fails with the list |
+| `wipe` | everything the test bed put on the host: load processes, `tb-block` firewall rules, rcm, node, an fbagent it installed (an `existing` agent stays); then the same check. `tb.py hosts wipe --hosts H --yes` also removes the work folder |
 | `fbagent-info` | `local_api` settings of an existing agent (the token on a `TBSECRET` line) |
 
 ## 20-goafts — install from a goafts server
@@ -55,11 +56,26 @@ check the sha256 of the release metadata.
 | `enroll` | `fbagent --setup <fb root> --bootstrap-url --server-pin`, waits until the CSR is approved; then turns on `local_api` and installs the agent service |
 | `install --product-install direct` | registers the node / RCM services from the downloaded binaries |
 | `install --product-install agent` | puts node.json/rcm.json and certs in place, sets `<product>.update.install_enabled`, runs `fbagent --product-update <id> --apply` (needs the products published on goafts) |
-| `uninstall` | services, folders, the agent (hqmonitor too); `tb.py uninstall --deregister` also deletes the agent on goafts through the admin API |
+| `uninstall` | as in 10-local, with the same check of what is left; `tb.py uninstall --deregister` also deletes the agent on goafts through the admin API |
 
 CSR approval: with `goafts.admin` set in the local config (admin URL, client
 certificate, key, admin token) tb.py approves the CSRs of the test bed hosts
 itself. Without it, approve them in the goafts admin panel while tb.py waits.
+A pending CSR has no agent id yet, so tb.py approves a request only when all
+of these hold: the host name in it is exactly the host's name (no prefix
+match), it came from one of the host's addresses, it was made after this
+enrollment began, and it is the only such request for that host. Anything
+else is logged and left for a person: on a shared goafts it never approves
+another bed's request.
+
+## Ports
+
+`firebird.port` and `fbagent.port` may be left out (or 0). Then `install`
+takes the Firebird port from `RemoteServicePort` in `firebird.conf` (3050 when
+it is not set) and, for an `existing` agent, the fbagent port from its
+`local_api.listen` (13055, fbagent's own default, when it is not set). A new
+agent gets 13055. A port set in the config must match what the host says, or
+`install` stops with both values.
 
 ## 30-dbs — test databases
 

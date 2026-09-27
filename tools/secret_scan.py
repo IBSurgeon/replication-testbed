@@ -29,6 +29,8 @@ PATTERNS = [
     ("masterkey", re.compile(r"(?i)\bmasterkey\b")),
 ]
 ALLOWED_IPS = {"0.0.0.0", "127.0.0.1"}
+# RFC 5737 documentation ranges: examples and self-tests, never real hosts.
+DOC_NETS = ("192.0.2.", "198.51.100.", "203.0.113.")
 GENERIC_USERS = {"root", "admin", "administrator", "ubuntu", "user", "firebird", "sysdba"}
 SKIP_SUFFIX = (".png", ".jpg", ".gif", ".ico", ".zip", ".exe")
 
@@ -94,7 +96,7 @@ def main():
         for n, line in enumerate(text.splitlines(), 1):
             for name, rx in PATTERNS:
                 for m in rx.finditer(line):
-                    if name == "ipv4" and m.group(0) in ALLOWED_IPS:
+                    if name == "ipv4" and (m.group(0) in ALLOWED_IPS or m.group(0).startswith(DOC_NETS)):
                         continue
                     findings.append((rel, n, name, m.group(0)[:40]))
             for v in values:

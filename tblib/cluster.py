@@ -23,6 +23,10 @@ class TbError(Exception):
     pass
 
 
+FB_PORT_DEFAULT = 3050
+FBAGENT_PORT_DEFAULT = 13055     # fbagent listens here when local_api.listen is not set
+
+
 def now():
     return datetime.datetime.now().strftime("%H:%M:%S")
 
@@ -105,6 +109,21 @@ class Cluster:
         res, sec = parse_output(out)
         return rc, res, sec, out
 
+    # --- ports and ids ------------------------------------------------------
+    # A port set in the config wins. Port 0 means: what 'install' found on the
+    # host (state), else the product default.
+    def fb_port(self, name):
+        p = int(self.h(name)["firebird"].get("port") or 0)
+        return p or int(self.hstate(name).get("fb_port") or 0) or FB_PORT_DEFAULT
+
+    def fbagent_port(self, name):
+        p = int(self.h(name)["fbagent"].get("port") or 0)
+        return p or int(self.hstate(name).get("fbagent_port") or 0) or FBAGENT_PORT_DEFAULT
+
+    def fbagent_instance(self, name):
+        return (self.hstate(name).get("fbagent_instance") or self.h(name)["fbagent"]["instance_id"]
+                or f"tb-{name}-{self.fb_port(name)}")
+
     # --- common module arguments ---------------------------------------------
     def fb_service(self, name):
         h = self.h(name)
@@ -112,18 +131,18 @@ class Cluster:
 
     def base_args(self, name):
         h = self.h(name)
-        return {"fb_root": h["firebird"]["root"], "fb_port": h["firebird"]["port"],
+        return {"fb_root": h["firebird"]["root"], "fb_port": self.fb_port(name),
                 "fb_service": self.fb_service(name),
                 "fbagent_mode": h["fbagent"]["mode"], "fbagent_dir": h["fbagent"]["dir"],
-                "fbagent_port": h["fbagent"]["port"],
-                "fbagent_instance": self.hstate(name).get("fbagent_instance") or h["fbagent"]["instance_id"],
+                "fbagent_port": self.fbagent_port(name),
+                "fbagent_instance": self.fbagent_instance(name),
                 "fbagent_service": h["fbagent"]["service"],
                 "node_dir": h["paths"]["node"], "rcm_dir": h["paths"]["rcm"],
                 "db_root": h["paths"]["db_root"]}
 
     def hostctl(self, name, cmd, args=None, check=True, timeout=None):
         a = {"node_dir": self.h(name)["paths"]["node"], "fb_root": self.h(name)["firebird"]["root"],
-             "port": self.h(name)["firebird"]["port"]}
+             "port": self.fb_port(name)}
         a.update(args or {})
         rc, res, _, out = self.module(name, "90-hostctl", cmd, a, check=check, timeout=timeout)
         return res if rc == 0 else None
@@ -266,13 +285,13 @@ class Cluster:
         limits.update(cfg.limits)
         svc = self.fb_service(name)
         fbj = {"root": root, "user": cfg.secrets.get("firebird_user", "SYSDBA"),
-               "password": cfg.secrets.get("firebird_password", ""), "port": int(fb["port"]),
+               "password": cfg.secrets.get("firebird_password", ""), "port": self.fb_port(name),
                "replication_conf": hst.join(root, "replication.conf"),
                "replication_log": hst.join(root, "replication.log"),
                "firebird_log": hst.join(root, "firebird.log"),
-               "fbagent_url": f"http://127.0.0.1:{h['fbagent']['port']}",
+               "fbagent_url": f"http://127.0.0.1:{self.fbagent_port(name)}",
                "fbagent_token": self.fbagent_token(name),
-               "instance_id": self.hstate(name).get("fbagent_instance") or h["fbagent"]["instance_id"],
+               "instance_id": self.fbagent_instance(name),
                "service_name": svc, "restart_timeout_sec": 300}
         if h["os"] == "linux":
             fbj["systemd_unit"] = svc
@@ -334,7 +353,7 @@ class Cluster:
     def load_start(self, dbs, mode="write", tx="off", limbo=False, extended=True, conns="1:4",
                    minutes=0, think_ms=50, tag="load"):
         m = self.cfg.master
-        args = {"dbs": ",".join(dbs), "port": self.h(m)["firebird"]["port"], "mode": mode, "tx": tx,
+        args = {"dbs": ",".join(dbs), "port": self.fb_port(m), "mode": mode, "tx": tx,
                 "limbo": limbo, "extended": extended, "conns": conns, "minutes": minutes,
                 "think_ms": think_ms, "tag": tag}
         rc, res, _, _ = self.module(m, "50-load", "start", args)

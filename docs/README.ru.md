@@ -32,8 +32,14 @@ python tb.py load start --db all --mode mixed --tx emul-safe   # п.5: нагр�
 python tb.py test reinit_cycles --cycles 10      # п.7: много реинициализаций под нагрузкой
 python tb.py test disasters                      # п.8: аварии
 python tb.py dbs remove                          # удалить тестовые базы
-python tb.py uninstall --source local            # удалить установленное (goafts: --source goafts --deregister)
+python tb.py uninstall --source local            # удалить установленное (goafts: --source goafts --deregister); проверяет остатки
+python tb.py hosts wipe --hosts all --yes        # полная очистка хостов от всего, что поставил стенд
 ```
+
+Порты Firebird и fbagent можно не задавать: `install` берёт `RemoteServicePort`
+из `firebird.conf` (иначе 3050) и `local_api.listen` существующего агента
+(иначе 13055). CSR на goafts одобряется только при точном совпадении имени
+хоста, адреса источника и времени, и если такой запрос один.
 
 П.6 (реплики) — те же команды установки: `--hosts replicas` или `--hosts replica1`.
 
