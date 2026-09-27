@@ -58,4 +58,5 @@ Useful calls on the cluster object `cl`:
 | `cl.replica_path(replica, master_path)` | where the replica keeps its copy |
 | `cl.load_start(paths, mode, tx, ...)` / `cl.load_stop(tag)` | fb-loadgen on the master |
 | `cl.wait_converged(paths, timeout)` | poll row counts until the replicas match |
+| `converge_and_record(cl, res, case, paths, timeout)` | rows, then no active transactions left in the replica control files |
 | `ops.reinit(cl, db_id, replica, mode)` | reinit and wait for the operation |

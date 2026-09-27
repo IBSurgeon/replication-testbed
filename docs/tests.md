@@ -4,6 +4,14 @@
 `state/results/<test>-<time>/results.json` and `summary.md` and exits 0 only
 when every case passed.
 
+Every "converge" step has two checks. First the rows: every replica must match
+the master (row counts of keyed tables). Then, once the rows match, the
+replica control files: with the load stopped, Firebird's control file
+(`{GUID}` in the replica's journal source folder) must hold no active
+transaction within 90 s. A transaction left there keeps the replica's OAT and
+every segment after it, and Firebird replays it again after its next restart
+(hqcluster-node N-14: a reinit replay that lists transactions already ended).
+
 ## basic
 
 Load for `--minutes` (default 3), stop, then every replica must match the

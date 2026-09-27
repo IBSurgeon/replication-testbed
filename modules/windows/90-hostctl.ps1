@@ -11,6 +11,7 @@
 #   90-hostctl.ps1 block-peer   --addr ADDR [--port PORT]    (Windows Firewall, both ways)
 #   90-hostctl.ps1 unblock-peer --addr ADDR [--port PORT]
 #   90-hostctl.ps1 tail         --path FILE [--lines 50]
+#   90-hostctl.ps1 replctl      --dir JOURNAL_SOURCE_DIR   (replica control files)
 . (Join-Path $PSScriptRoot "common.ps1")
 $TbName = "90-hostctl"
 
@@ -143,5 +144,25 @@ order by 1;
 
   "tail" { Get-Content -LiteralPath (Arg $A "path") -Tail ([int](Arg $A "lines" "50")) | ForEach-Object { [Console]::Out.WriteLine($_) } }
 
-  default { Die "usage: 90-hostctl.ps1 secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail" }
+  "replctl" {
+    # Firebird's replica control files ({GUID}) in a journal source folder:
+    # the position applied so far and the transactions held as active.
+    $out = @()
+    foreach ($f in @(Get-ChildItem -LiteralPath (Arg $A "dir") -File -Filter "{*}" -ErrorAction SilentlyContinue | Sort-Object Name)) {
+      $b = [IO.File]::ReadAllBytes($f.FullName)
+      if ($b.Length -lt 40 -or [Text.Encoding]::ASCII.GetString($b, 0, 9) -ne "FBREPLCTL") {
+        $out += @{ file = $f.FullName; error = "not a control file" }; continue
+      }
+      $n = [BitConverter]::ToUInt32($b, 12)
+      $act = @()
+      for ($i = 0; $i -lt $n; $i++) {
+        $act += @{ tra = [BitConverter]::ToUInt64($b, 40 + 16 * $i); seq = [BitConverter]::ToUInt64($b, 48 + 16 * $i) }
+      }
+      $out += @{ file = $f.FullName; sequence = [BitConverter]::ToUInt64($b, 16); offset = [BitConverter]::ToUInt32($b, 24)
+                 db_sequence = [BitConverter]::ToUInt64($b, 32); active = $act }
+    }
+    [Console]::Out.WriteLine("TBRESULT " + (ConvertTo-Json @($out) -Compress -Depth 5))
+  }
+
+  default { Die "usage: 90-hostctl.ps1 secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl" }
 }

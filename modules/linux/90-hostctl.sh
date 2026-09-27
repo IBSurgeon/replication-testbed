@@ -12,6 +12,7 @@
 #   90-hostctl.sh block-peer  --addr ADDR [--port PORT]      (iptables, both ways)
 #   90-hostctl.sh unblock-peer --addr ADDR [--port PORT]
 #   90-hostctl.sh tail        --path FILE [--lines 50]
+#   90-hostctl.sh replctl     --dir JOURNAL_SOURCE_DIR   (replica control files)
 #
 # Results come as one "TBRESULT <json>" line.
 source "$(dirname "$0")/common.sh"
@@ -133,5 +134,26 @@ print("TBRESULT " + json.dumps(rows))' <<<"$out"
 
   tail) tail -n "$(arg lines 50)" "$(arg path)" ;;
 
-  *) die "usage: 90-hostctl.sh secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail" ;;
+  replctl)
+    # Firebird's replica control files ({GUID}) in a journal source folder:
+    # the position applied so far and the transactions held as active.
+    python3 - "$(arg dir)" <<'PY'
+import glob, json, os, struct, sys
+out = []
+for f in sorted(glob.glob(os.path.join(sys.argv[1], "{*}"))):
+    b = open(f, "rb").read()
+    if len(b) < 40 or not b.startswith(b"FBREPLCTL"):
+        out.append({"file": f, "error": "not a control file"})
+        continue
+    n, = struct.unpack_from("<I", b, 12)
+    seq, = struct.unpack_from("<Q", b, 16)
+    off, = struct.unpack_from("<I", b, 24)
+    dbs, = struct.unpack_from("<Q", b, 32)
+    act = [dict(zip(("tra", "seq"), struct.unpack_from("<QQ", b, 40 + 16 * i))) for i in range(n)]
+    out.append({"file": f, "sequence": seq, "offset": off, "db_sequence": dbs, "active": act})
+print("TBRESULT " + json.dumps(out))
+PY
+    ;;
+
+  *) die "usage: 90-hostctl.sh secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl" ;;
 esac

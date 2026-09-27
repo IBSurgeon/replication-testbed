@@ -120,4 +120,6 @@ list of the master host.
 certs), `node-svc stop|start|restart|kill`, `fb-svc stop|start|restart|status`,
 `counts` (row count of every user table; keyed tables must match),
 `limbo` (`gfix -list`), `files`, `remove-file`, `block-peer` / `unblock-peer`
-(iptables on Linux, Windows Firewall rules on Windows), `tail`.
+(iptables on Linux, Windows Firewall rules on Windows), `tail`,
+`replctl --dir D` (Firebird's replica control files `{GUID}` in a journal
+source folder: applied position, `db_sequence`, active transactions).
