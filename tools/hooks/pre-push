@@ -1,0 +1,3 @@
+#!/bin/sh
+# Enable with: git config core.hooksPath tools/hooks
+exec python "$(git rev-parse --show-toplevel)/tools/secret_scan.py"

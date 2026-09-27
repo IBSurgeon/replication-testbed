@@ -1,0 +1,131 @@
+{
+  "_readme": [
+    "Copy this file to config/testbed.local.json and fill it in.",
+    "config/testbed.local.json is git-ignored. Real hosts, users, URLs, pins and passwords go ONLY there.",
+    "Keys that start with '_' are comments. Empty strings mean 'use the default for this OS'."
+  ],
+
+  "cluster": {
+    "master": "master",
+    "replicas": ["replica1", "replica2"],
+    "rcm_host": "master",
+    "rcm_enabled": true
+  },
+
+  "secrets": {
+    "firebird_user": "SYSDBA",
+    "firebird_password": "<SYSDBA password>",
+    "_fbagent_token": "Empty: tb.py generates one token per host and keeps it in state/state.json.",
+    "fbagent_token": "",
+    "rcm_user": "<RCM operator user>",
+    "rcm_password": "<RCM operator password>"
+  },
+
+  "artifacts": {
+    "_readme": "Local copies used by 'install --source local'. Paths are on the operator machine.",
+    "dir": "<folder with the binaries>",
+    "linux":   { "fbagent": "fbagent-linux-amd64",       "hqclusternode": "hqclusternode-linux-amd64",       "hqbirdrcm": "hqbirdrcm-linux-amd64" },
+    "windows": { "fbagent": "fbagent-windows-amd64.exe", "hqclusternode": "hqclusternode-windows-amd64.exe", "hqbirdrcm": "hqbirdrcm-windows-amd64.exe" }
+  },
+
+  "goafts": {
+    "_readme": "Used by 'install --source goafts'. url = bootstrap URL (port 9443). pin = SPKI SHA-256 of the server certificate, 64 hex characters.",
+    "url": "https://<goafts-host>:9443",
+    "pin": "<64 hex characters>",
+    "channel": "stable",
+    "_product_install": "direct: download hqclusternode/hqbirdrcm from goafts and register the services. agent: let fbagent install them (fbagent --product-update <id> --apply).",
+    "product_install": "direct",
+    "enroll_timeout": "30m",
+    "admin": {
+      "_readme": "Optional. When set, tb.py approves the CSR of each host and can deregister agents on uninstall.",
+      "url": "",
+      "client_cert": "",
+      "client_key": "",
+      "token": ""
+    }
+  },
+
+  "loadgen": {
+    "_readme": "fb-loadgen source: a git URL, or a local checkout, or a ready binary.",
+    "git_url": "<git URL of fb-loadgen>",
+    "git_ref": "main",
+    "local_src": "",
+    "binary_linux": "",
+    "binary_windows": ""
+  },
+
+  "ssh": {
+    "_readme": "OpenSSH client on the operator machine. key may be empty when an ssh-agent holds it.",
+    "ssh_bin": "ssh",
+    "scp_bin": "scp",
+    "key": "",
+    "proxy_command": "",
+    "connect_timeout": 15
+  },
+
+  "dbs": {
+    "subdir": "tb",
+    "count": 2,
+    "file_name": "employee.fdb",
+    "_source": "Empty: <firebird root>/examples/empbuild/employee.fdb on the master.",
+    "source": ""
+  },
+
+  "hosts": {
+    "master": {
+      "os": "linux",
+      "_ssh": "user@host, or 'local' to run on this machine. The user must be root on Linux (or set sudo: true) and an administrator on Windows.",
+      "ssh": "root@<master-ssh-host>",
+      "ssh_port": 22,
+      "sudo": false,
+      "_addr": "Address the other nodes use to reach this host. Goes into certificates and peer URLs.",
+      "addr": "<master-address>",
+      "node_id": "tb-master",
+      "node_port": 7051,
+      "firebird": { "root": "", "port": 3050, "service": "" },
+      "fbagent": { "mode": "install", "dir": "", "port": 13050, "instance_id": "", "service": "" },
+      "paths": { "work": "", "node": "", "rcm": "", "db_root": "" }
+    },
+    "replica1": {
+      "os": "linux",
+      "ssh": "root@<replica1-ssh-host>",
+      "ssh_port": 22,
+      "sudo": false,
+      "addr": "<replica1-address>",
+      "node_id": "tb-replica1",
+      "node_port": 7052,
+      "firebird": { "root": "", "port": 3050, "service": "" },
+      "fbagent": { "mode": "install", "dir": "", "port": 13050, "instance_id": "", "service": "" },
+      "paths": { "work": "", "node": "", "rcm": "", "db_root": "" }
+    },
+    "replica2": {
+      "os": "windows",
+      "ssh": "<user>@<replica2-ssh-host>",
+      "ssh_port": 22,
+      "sudo": false,
+      "addr": "<replica2-address>",
+      "node_id": "tb-replica2",
+      "node_port": 7052,
+      "firebird": { "root": "C:\\HQbird\\Firebird50", "port": 3050, "service": "<Firebird Windows service name>" },
+      "fbagent": { "mode": "existing", "dir": "<fbagent folder>", "port": 13050, "instance_id": "", "service": "" },
+      "paths": { "work": "", "node": "", "rcm": "", "db_root": "" }
+    }
+  },
+
+  "limits": {
+    "channel_a_mbps": 50,
+    "channel_a_burst_mbps": 200,
+    "reinit_window_mbps": 100,
+    "reinit_day_disk_fraction": 0.5,
+    "free_space_floor_gb": 1,
+    "backlog_warn": 32,
+    "backlog_critical": 48,
+    "retention_days": 2
+  },
+
+  "windows": {
+    "master_restart_window": "always",
+    "replica_restart_window": "always",
+    "transfer_window": "always"
+  }
+}

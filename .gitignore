@@ -1,0 +1,24 @@
+# Local configuration: real hosts, users and secrets live ONLY here.
+config/*.local.json
+config/local/
+
+# Run state: generated tokens, certificates, rendered configs, results.
+state/
+
+# Binaries and build output.
+dist/
+bin/
+*.exe
+fb-loadgen
+
+# Keys and tokens, wherever they end up.
+*.key
+*.pem
+*.token
+*.p12
+secrets.env
+
+# Python.
+__pycache__/
+*.pyc
+.venv/
