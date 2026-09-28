@@ -112,7 +112,7 @@ note shows the whole chain.
 | apply-errors, master-stop, disabled, constraint | T15 T16 T17 T21 T32 T33 | ERROR blocks appended to replication.log (simulated, see below) |
 | conflict, foreign | T20 T23 | a segment pushed to the replica from the master host with the master's certificate: the last sequence with other bytes; another database's segment |
 | replaced, segment-lost, disk | T24 T25 T27 | master file with a new GUID (nbackup copy, `-F`); a segment gone from the mailbox and the archive; free-space floor above the free space |
-| reinit-fail, stale | T26 T29 T31 T7 | reinit to a stopped replica node; the master node stopped right after it released the nbackup lock |
+| reinit-fail, stale | T29 T31, T7 from FAILED, T26 | reinit to a stopped replica node (FAILED), then publication/sync; the master node stopped right after it released the nbackup lock (stale generation) |
 | orphan, remove | T34 T35 T4 T6 T36 | the file in `exclude_paths` and back; `dbs remove` and forget |
 
 Firebird cannot be made to log an apply error, "Replication is stopped",
