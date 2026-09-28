@@ -113,13 +113,21 @@ def g_failed(sm):
         node_svc(cl, rep, "stop")
         st, r = sm.start_reinit(rep)
         if st in (200, 202):
-            cl.wait_op(sm.m, r["operation_id"], timeout=600)
-        s = sm.wait(sm.m, "FAILED", 60)
+            op = cl.wait_op(sm.m, r["operation_id"], timeout=600)
+        else:
+            op = {"state": f"HTTP {st}"}
+        # State machine v2 (D5): FAILED is no longer a sticky state. The
+        # failed attempt is recorded in last_op, and the view recovers as
+        # soon as the pairs' evidence justifies it — the question here is
+        # whether the OTHER replica keeps receiving, which the load below
+        # answers directly.
+        rec = sm.rec(sm.m) or {}
+        failed = (rec.get("last_op") or {}).get("result") == "failed" or op.get("state") == "failed"
     finally:
         node_svc(cl, rep, "start")
         wait_node(cl, rep, 180)
-    if s != "FAILED":
-        setup_failed(sm, 3, f"master is {s} after a reinit to a stopped replica node")
+    if not failed:
+        setup_failed(sm, 3, f"the reinit to the stopped {rep} did not fail (op {op.get('state')})")
         return
     a0, arch0 = int(sm.ledger(rep2).get("last_acked") or 0), newest_archived(sm)
     sm.load(120)
@@ -128,8 +136,8 @@ def g_failed(sm):
     ok = a1 > a0
     sm.res.record("12.3 FAILED stops shipping to the other replicas", "PASS" if ok else "FAIL",
                   note=(f"{rep2} kept receiving: acked {a0}->{a1}" if ok else
-                        f"confirmed: master FAILED (reinit to {rep}); {rep2} acked {a0}->{a1} "
-                        f"while the master archived {arch0}->{arch1}"))
+                        f"confirmed: reinit to {rep} failed (v2 records it in last_op); "
+                        f"{rep2} acked {a0}->{a1} while the master archived {arch0}->{arch1}"))
 
 
 def g_frozen(sm):
@@ -140,6 +148,14 @@ def g_frozen(sm):
     note = stale_setup(sm, rep)
     if sm.state(sm.m).startswith("FAILED"):
         cl.api(sm.m, "POST", "/v1/publication/sync", {}, check_status=False)
+    # The crash has to land between the image reaching the replica and the
+    # master's own generation update; when it lands early the replica never
+    # holds a newer image and no 410 ever comes. Retry the setup once — the
+    # second attempt usually lands the window.
+    if not sm.wait(sm.m, "NEEDS_REINIT", 60):
+        note += "; retry (the first crash missed the window)"
+        note2 = stale_setup(sm, rep)
+        note = f"{note}; {note2}"
     sm.load_on()
     try:
         s = sm.wait(sm.m, "NEEDS_REINIT", 300)
@@ -239,7 +255,10 @@ def g_rcm_jobs(sm):
     vid = (job or {}).get("id") if isinstance(job, dict) else None
     rcm_wait_up(sm)
     st2, cmd = rcm(sm, "POST", f"/v1/nodes/{mid}/publication/sync", {}, then_restart=True)
-    cid = (cmd or {}).get("id") if isinstance(cmd, dict) else None
+    # The command endpoint answers 202 with {command_id, command}.
+    cid = None
+    if isinstance(cmd, dict):
+        cid = cmd.get("command_id") or (cmd.get("command") or {}).get("id")
     rcm_wait_up(sm)
     time.sleep(min(a.settle, 180))
     for what, ident, path, done in (("verify job", vid, "/v1/verify/", ("ok", "desynced", "failed")),
