@@ -31,6 +31,13 @@ class Trace:
     def __init__(self, cl, host, db_id=""):
         self.cl, self.host, self.db_id = cl, host, db_id
         self.start = self._read(-1)["lines"]
+        # The state at the mark heads the chain: the first change after it is
+        # a step from this state (IN_SYNC -> LAGGING), not a start.
+        self.before = None
+        if db_id:
+            st, r = cl.api(host, "GET", f"/v1/databases/{db_id}", check_status=False)
+            if st == 200 and isinstance(r, dict) and r.get("state"):
+                self.before = r["state"] + ("/" + r["state_reason"] if r.get("state_reason") else "")
 
     def _read(self, start):
         r = self.cl.hostctl(self.host, "statelog", {"db_id": self.db_id or "-", "from": start}, check=False)
@@ -39,9 +46,11 @@ class Trace:
     def events(self):
         return [e for e in self._read(self.start)["events"] if e.get("type") == "db_state"]
 
-    def chain(self):
-        """The states in order, repeats of the same state and reason folded."""
-        out = []
+    def chain(self, head=True):
+        """The states in order, repeats of the same state and reason folded,
+        starting with the state at the mark when the database had one (head
+        False: only the changes after the mark)."""
+        out = [self.before] if self.before and head else []
         for e in self.events():
             s = e.get("state") or "?"
             if e.get("reason"):
@@ -131,8 +140,10 @@ class SM:
         return {}
 
     def node_config(self, host):
+        """node.json as the node runs it (GET /v1/config wraps it in "config")."""
         _, c = self.cl.api(host, "GET", "/v1/config")
-        return c or {}
+        c = c or {}
+        return c.get("config") if isinstance(c.get("config"), dict) else c
 
     def replication_log(self, host):
         p = (self.node_config(host).get("firebird") or {}).get("replication_log")

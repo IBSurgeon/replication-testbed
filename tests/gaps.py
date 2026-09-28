@@ -32,8 +32,8 @@ from tblib.results import SKIP, Results
 
 from ._common import add_load_args, delta_left, pick_replicas
 from ._sm import SM, fb_start_all
-from .disasters import node_svc, wait_node
-from .states import conflict_push, settled, stale_setup
+from .disasters import fb_svc, node_svc, wait_node
+from .states import conflict_push, fill_mailbox, settled, stale_setup
 
 HELP = "state machine section 12: is each possible gap a real problem"
 
@@ -61,7 +61,17 @@ def setup_failed(sm, item, note):
 # --- items -----------------------------------------------------------------------
 def g_conflict(sm):
     cl, rep, a = sm.cl, sm.rep, sm.a
-    r = conflict_push(sm, rep)
+    # A sequence the replica has applied is answered "acked" without looking
+    # at its content, so the pushed one must still wait in the mailbox:
+    # Firebird on the replica is stopped while the load fills it.
+    fb_svc(cl, rep, "stop")
+    try:
+        if not fill_mailbox(sm, rep, n=2):
+            setup_failed(sm, 1, "no segment waited in the replica's mailbox")
+            return
+        r = conflict_push(sm, rep)
+    finally:
+        fb_svc(cl, rep, "start")
     sm.load_on()
     try:
         s = sm.wait(sm.m, "NEEDS_ATTENTION/sequence_conflict", 240)

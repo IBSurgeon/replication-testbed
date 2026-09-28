@@ -69,8 +69,11 @@ def add_args(p):
 
 def check(sm, name, host, trace, steps, extra=""):
     chain = trace.chain()
+    # "*" asks whether the database reached a state during the scenario, so
+    # the state it had at the mark does not count.
+    new = trace.chain(head=False)
     for t, frm, to in steps:
-        ok = has_step(chain, frm, to)
+        ok = has_step(new if frm == "*" else chain, frm, to)
         arrow = f"{'(new)' if frm == '^' else frm}->{to}"
         sm.res.record(f"{t} {arrow} [{name}, {host}]", "PASS" if ok else "FAIL",
                       note=(extra + "; " if extra else "") + "chain: " + " > ".join(chain[-14:]), chain=chain)
@@ -404,9 +407,15 @@ def sc_stale(sm):
 def sc_orphan(sm):
     cl = sm.cl
     tm = Trace(cl, sm.m, sm.db_id)
-    old = list((sm.node_config(sm.m).get("databases") or {}).get("exclude_paths") or [])
+    dbs = sm.node_config(sm.m).get("databases") or {}
+    old = list(dbs.get("exclude_paths") or [])
+    # exclude_paths are relative to databases.root, slash-separated.
+    root = (dbs.get("root") or "").replace("\\", "/").rstrip("/")
+    path = sm.path.replace("\\", "/")
+    if not root or not path.lower().startswith(root.lower() + "/"):
+        raise TbError(f"{sm.path} is not under the master's databases.root {root!r}")
     try:
-        cl.api(sm.m, "PUT", "/v1/config", {"databases": {"exclude_paths": old + [sm.path]}})
+        cl.api(sm.m, "PUT", "/v1/config", {"databases": {"exclude_paths": old + [path[len(root) + 1:]]}})
         sm.wait(sm.m, "ORPHANED", 90)
     finally:
         cl.api(sm.m, "PUT", "/v1/config", {"databases": {"exclude_paths": old}}, check_status=False)
