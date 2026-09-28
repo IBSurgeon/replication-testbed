@@ -189,7 +189,12 @@ def g_crash(sm):
                         check_status=False)
     phase = (pbody or {}).get("phase") if isinstance(pbody, dict) else None
     left, secs, s1 = sm.wait_not(sm.m, "SEEDING", a.settle) if s0.startswith("SEEDING") else (True, 0, s0)
+    # The node unlocks at start (nbackup -N): give it a minute.
+    end = time.time() + 60
     lock = delta_left(cl, sm.path)
+    while lock and time.time() < end:
+        time.sleep(5)
+        lock = delta_left(cl, sm.path)
     ctx = f"killed with the lock on ({t.result}); after restart: {s0}, GET reinit HTTP {rst}"
     sm.res.record("12.5 nbackup lock released after a node crash", "PASS" if not lock else "FAIL",
                   note=(f"no .delta {a.settle}s later" if not lock else
@@ -249,7 +254,7 @@ def g_rcm_jobs(sm):
     vid = (job or {}).get("id") if isinstance(job, dict) else None
     rcm_wait_up(sm)
     st2, cmd = rcm(sm, "POST", f"/v1/nodes/{mid}/publication/sync", {}, then_restart=True)
-    cid = (cmd or {}).get("id") if isinstance(cmd, dict) else None
+    cid = ((cmd or {}).get("command_id") or (cmd or {}).get("id")) if isinstance(cmd, dict) else None
     rcm_wait_up(sm)
     time.sleep(min(a.settle, 180))
     for what, ident, path, done in (("verify job", vid, "/v1/verify/", ("ok", "desynced", "failed")),

@@ -22,15 +22,25 @@ need_root() { [[ $EUID -eq 0 ]] || die "run as root"; }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 
+# Export the KEY=VALUE lines of the secrets file. They are read as data, not
+# sourced as shell code: a value may hold spaces or shell characters (an RCM
+# password with a space broke `. secrets.env`).
+read_secrets() {
+  [[ -f "$TB_SECRETS" ]] || return 0
+  local line key
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+    key="${line%%=*}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    export "$key=${line#*=}"
+  done < "$TB_SECRETS"
+}
+
 # Load secrets and export the Firebird client variables. isql, gfix, gstat and
 # nbackup read ISC_USER / ISC_PASSWORD, so the password never shows in `ps`.
 load_secrets() {
-  if [[ -f "$TB_SECRETS" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    . "$TB_SECRETS"
-    set +a
-  fi
+  read_secrets
   export ISC_USER="${TB_FB_USER:-SYSDBA}"
   [[ -n "${TB_FB_PASSWORD:-}" ]] || die "TB_FB_PASSWORD is not set (secrets file $TB_SECRETS)"
   export ISC_PASSWORD="$TB_FB_PASSWORD"

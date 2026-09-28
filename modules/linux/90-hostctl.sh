@@ -320,7 +320,7 @@ PY
     ;;
 
   rcm-api)
-    [[ -f "$TB_SECRETS" ]] && { set -a; . "$TB_SECRETS"; set +a; }
+    read_secrets
     python3 - "$(arg method GET)" "$(arg path /v1/alerts)" "$(arg body_b64)" "$(arg then_restart false)" <<'PY'
 import base64, json, os, subprocess, sys, urllib.error, urllib.request
 method, path, body, restart = sys.argv[1:5]
