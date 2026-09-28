@@ -69,8 +69,11 @@ def add_args(p):
 
 def check(sm, name, host, trace, steps, extra=""):
     chain = trace.chain()
+    # "*" asks whether the database reached a state during the scenario, so
+    # the state it had at the mark does not count.
+    new = trace.chain(head=False)
     for t, frm, to in steps:
-        ok = has_step(chain, frm, to)
+        ok = has_step(new if frm == "*" else chain, frm, to)
         arrow = f"{'(new)' if frm == '^' else frm}->{to}"
         sm.res.record(f"{t} {arrow} [{name}, {host}]", "PASS" if ok else "FAIL",
                       note=(extra + "; " if extra else "") + "chain: " + " > ".join(chain[-14:]), chain=chain)
@@ -398,10 +401,28 @@ def stale_setup(sm, rep):
 
 def sc_stale(sm):
     cl, rep = sm.cl, sm.rep
+    # T7 from FAILED: a reinit to a stopped replica node fails (as in
+    # reinit-fail), then a publication sync. Stopping the master node at the
+    # nbackup unlock does not give FAILED: the job is done by then.
+    tm = Trace(cl, sm.m, sm.db_id)
+    s = "?"
+    try:
+        node_svc(cl, rep, "stop")
+        st, r = sm.start_reinit(rep)
+        if st in (200, 202):
+            cl.wait_op(sm.m, r["operation_id"], timeout=600)
+        s = sm.wait(sm.m, "FAILED", 60)
+        if s.startswith("FAILED"):
+            cl.api(sm.m, "POST", "/v1/publication/sync", {}, check_status=False)
+            time.sleep(15)
+    finally:
+        node_svc(cl, rep, "start")
+        wait_node(cl, rep, 180)
+    check(sm, "failed-publish", "master", tm, [("T7", "FAILED", "PUBLISHING")],
+          f"master {s} after a reinit to a stopped replica node, then publication/sync")
+
     tm = Trace(cl, sm.m, sm.db_id)
     note = stale_setup(sm, rep)
-    if sm.state(sm.m).startswith("FAILED"):
-        cl.api(sm.m, "POST", "/v1/publication/sync", {}, check_status=False)
     try:
         sm.load_on()
         sm.wait(sm.m, "NEEDS_REINIT", 300)

@@ -50,9 +50,11 @@ class Trace:
     def events(self):
         return [e for e in self._read(self.start)["events"] if e.get("type") == "db_state"]
 
-    def chain(self):
-        """The states in order, repeats of the same state and reason folded."""
-        out = [self.seed] if self.seed else []
+    def chain(self, head=True):
+        """The states in order, repeats of the same state and reason folded,
+        starting with the seed state when there was one (head False: only the
+        changes after the mark — a wait for a state the seed already is)."""
+        out = [self.seed] if self.seed and head else []
         for e in self.events():
             s = e.get("state") or "?"
             if e.get("reason"):
@@ -142,12 +144,11 @@ class SM:
         return {}
 
     def node_config(self, host):
-        # The node answers GET /v1/config with the management envelope
-        # {config, config_version, restart_node}; the payload is the config
-        # itself. Tolerate a bare-config answer too.
+        """node.json as the node runs it (GET /v1/config wraps it in "config";
+        a bare-config answer is tolerated too)."""
         _, c = self.cl.api(host, "GET", "/v1/config")
         c = c or {}
-        return c.get("config") or c
+        return c.get("config") if isinstance(c.get("config"), dict) else c
 
     def replication_log(self, host):
         p = (self.node_config(host).get("firebird") or {}).get("replication_log")

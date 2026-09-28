@@ -84,7 +84,9 @@ switch ($p.Cmd) {
     $exe = Join-Path $FbaDir "fbagent.exe"
     Copy-Item -LiteralPath $src -Destination $exe -Force
     $cfgPath = Join-Path $FbaDir "agent_config.json"
-    $setup = if (Test-Path -LiteralPath $cfgPath) { @("--enroll") } else { @("--setup", $FbRoot) }
+    # @(...) around the if: a one-element result unrolls to a string, and
+    # string + array would glue every argument into one.
+    $setup = @(if (Test-Path -LiteralPath $cfgPath) { "--enroll" } else { "--setup", $FbRoot })
     Log "fbagent $($setup -join ' ') --bootstrap-url $Url (waits for CSR approval)"
     Push-Location $FbaDir
     try {

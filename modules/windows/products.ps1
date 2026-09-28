@@ -8,7 +8,13 @@
 
 function Lock-Dir([string]$dir) {
   # Administrators + SYSTEM only: node.json and rcm.json hold passwords.
-  & icacls.exe $dir /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /T | Out-Null
+  # The folder only, then everything in it inherits from it. With /T the
+  # (OI)(CI) grants do not apply to files, and /inheritance:r left every
+  # file already there with an empty DACL: fbagent.exe could not be run.
+  & icacls.exe $dir /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
+  if (Get-ChildItem -Force -LiteralPath $dir | Select-Object -First 1) {
+    & icacls.exe (Join-Path $dir "*") /reset /T /C /Q | Out-Null
+  }
 }
 
 # ---------------------------------------------------------------- Firebird --

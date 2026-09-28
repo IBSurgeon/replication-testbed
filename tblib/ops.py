@@ -262,9 +262,13 @@ def install(cl, source, hosts="all", only=None, new_certs=False):
                                                    "products": ",".join(prods)})
         enroll_goafts(cl, [n for n in names if "fbagent" in plan[n]])
 
-    if not os.path.exists(C.state_path("certs", "ca.crt")) or new_certs:
-        if cfg.master not in names and not os.path.exists(C.state_path("certs", "ca.crt")):
-            raise TbError("no certificates yet: include the master host in the first install")
+    have = os.path.exists(C.state_path("certs", "ca.crt"))
+    if cfg.master not in names and not have:
+        raise TbError("no certificates yet: include the master host in the first install")
+    # With the master in the install, ensure_certs also checks the certificates
+    # were made for these addresses: new droplets get new ones. A partial
+    # install keeps what the other hosts already have.
+    if cfg.master in names or new_certs or not have:
         cl.ensure_certs(force=new_certs)
 
     for n in names:
