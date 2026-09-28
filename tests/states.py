@@ -418,7 +418,11 @@ def sc_stale(sm):
     finally:
         node_svc(cl, rep, "start")
         wait_node(cl, rep, 180)
-    check(sm, "failed-publish", "master", tm, [("T7", "FAILED", "PUBLISHING")],
+    # State machine v2 (D5): nothing routes FAILED->PUBLISHING on demand —
+    # the failed reinit is history, and with the replica still stopped the
+    # last caught-up verdict stands (IN_SYNC), so the hop after the
+    # publication sync is FAILED->IN_SYNC, not mainline's FAILED->PUBLISHING.
+    check(sm, "failed-publish", "master", tm, [("T7", "FAILED", "IN_SYNC")],
           f"master {s} after a reinit to a stopped replica node, then publication/sync")
 
     tm = Trace(cl, sm.m, sm.db_id)
