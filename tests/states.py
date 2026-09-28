@@ -358,8 +358,13 @@ def sc_reinit_fail(sm):
         node_svc(cl, rep, "start")
         wait_node(cl, rep, 180)
     sm.recover("reinit-fail")
+    # State machine v2: a failed reinit no longer pins FAILED — shipping
+    # resumes (the generation was rolled back), so once the pairs catch up
+    # the view recovers before the retry starts. FAILED->SEEDING adjacency
+    # is therefore "FAILED|recovered -> SEEDING".
     check(sm, "reinit-fail", "master", tm, [("T29", "*", "SEEDING"), ("T31", "SEEDING", "FAILED"),
-                                            ("T29", "FAILED", "SEEDING"), ("T30", "SEEDING", "IN_SYNC")], note)
+                                            ("T29", "FAILED|IN_SYNC|CONFIGURED|LAGGING", "SEEDING"),
+                                            ("T30", "SEEDING", "IN_SYNC")], note)
 
 
 def stale_setup(sm, rep):

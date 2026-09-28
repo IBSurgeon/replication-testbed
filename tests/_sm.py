@@ -26,11 +26,22 @@ TAG = "sm"
 
 
 class Trace:
-    """State changes of one database on one node since this object was made."""
+    """State changes of one database on one node since this object was made.
+    The state at the moment of creation is part of the chain: it is an
+    observed fact, and the transitions below read as FROM it — without the
+    seed a scenario opening on a database that has been IN_SYNC since the
+    previous scenario's recovery would record no IN_SYNC entry at all, and
+    an IN_SYNC->LAGGING adjacency could never match."""
 
     def __init__(self, cl, host, db_id=""):
         self.cl, self.host, self.db_id = cl, host, db_id
-        self.start = self._read(-1)["lines"]
+        full = self._read(0)
+        self.start = full["lines"]
+        self.seed = ""
+        last = [e for e in full.get("events", []) if e.get("type") == "db_state"]
+        if last:
+            e = last[-1]
+            self.seed = (e.get("state") or "") + (("/" + e["reason"]) if e.get("reason") else "")
 
     def _read(self, start):
         r = self.cl.hostctl(self.host, "statelog", {"db_id": self.db_id or "-", "from": start}, check=False)
@@ -41,7 +52,7 @@ class Trace:
 
     def chain(self):
         """The states in order, repeats of the same state and reason folded."""
-        out = []
+        out = [self.seed] if self.seed else []
         for e in self.events():
             s = e.get("state") or "?"
             if e.get("reason"):
@@ -131,8 +142,12 @@ class SM:
         return {}
 
     def node_config(self, host):
+        # The node answers GET /v1/config with the management envelope
+        # {config, config_version, restart_node}; the payload is the config
+        # itself. Tolerate a bare-config answer too.
         _, c = self.cl.api(host, "GET", "/v1/config")
-        return c or {}
+        c = c or {}
+        return c.get("config") or c
 
     def replication_log(self, host):
         p = (self.node_config(host).get("firebird") or {}).get("replication_log")
