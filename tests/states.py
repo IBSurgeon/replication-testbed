@@ -239,7 +239,13 @@ def conflict_push(sm, rep):
     seq = int(rec.get("last_received") or 0) or int(sm.ledger(rep).get("last_acked") or 0)
     if seq <= 0:
         raise TbError("the replica has received no segment yet")
-    meta = {"db_id": sm.rid(rep), "sequence": seq, "generation": int(rec.get("generation") or 0),
+    # The generation of the RECEIVED stream, not the record's: a reinit
+    # stamps the record newer than the segments it shipped afterwards, and
+    # a push with the record's generation tells the receiver "newer image"
+    # -- it forgets its dedup history and accepts the divergent bytes as a
+    # fresh segment, which is a different (and legal) story.
+    gen = int(rec.get("received_generation") or 0) or int(rec.get("generation") or 0)
+    meta = {"db_id": sm.rid(rep), "sequence": seq, "generation": gen,
             "sha256": "auto"}
     return sm.push_segment(rep, meta, random_bytes=4096)
 
@@ -401,7 +407,11 @@ def sc_stale(sm):
         sm.wait(sm.m, "NEEDS_REINIT", 300)
     finally:
         sm.load_off()
-    check(sm, "stale", "master", tm, [("T31", "SEEDING", "FAILED"), ("T7", "FAILED", "PUBLISHING"),
+    # State machine v2: FAILED is no longer a sticky state (D5) — the
+    # crash-interrupted reinit shows FAILED only while the stream is
+    # unhealthy, and nothing routes FAILED->PUBLISHING on demand any more.
+    # The publication hop itself is covered by the create scenario (T7).
+    check(sm, "stale", "master", tm, [("T31", "SEEDING", "FAILED"),
                                       ("T26", "*", "NEEDS_REINIT")], note)
     sm.recover("stale")
 
@@ -410,8 +420,15 @@ def sc_orphan(sm):
     cl = sm.cl
     tm = Trace(cl, sm.m, sm.db_id)
     old = list((sm.node_config(sm.m).get("databases") or {}).get("exclude_paths") or [])
+    # exclude_paths are ROOT-RELATIVE (nodeconfig Databases.ExcludePaths doc):
+    # an absolute path never matches, the file stays enrolled, and nothing
+    # orphans.
+    root = cl.h(sm.m)["paths"]["db_root"].replace("\\", "/").rstrip("/")
+    rel = sm.path.replace("\\", "/")
+    if rel.lower().startswith(root.lower() + "/"):
+        rel = rel[len(root) + 1:]
     try:
-        cl.api(sm.m, "PUT", "/v1/config", {"databases": {"exclude_paths": old + [sm.path]}})
+        cl.api(sm.m, "PUT", "/v1/config", {"databases": {"exclude_paths": old + [rel]}})
         sm.wait(sm.m, "ORPHANED", 90)
     finally:
         cl.api(sm.m, "PUT", "/v1/config", {"databases": {"exclude_paths": old}}, check_status=False)
@@ -421,9 +438,15 @@ def sc_orphan(sm):
     cl.api(sm.m, "POST", "/v1/publication/sync", {}, check_status=False)
     sm.load(60)
     s = sm.wait(sm.m, "IN_SYNC", 300)
+    # State machine v2: after the restart a healthy stream shows IN_SYNC
+    # directly — the conf marker is visible in the conf axis, and the legacy
+    # view only surfaces PENDING_RESTART when nothing better holds (v2 doc
+    # 3.5/3.6). An idle database walks PENDING_RESTART->CONFIGURED->IN_SYNC;
+    # a loaded one may go PENDING_RESTART->IN_SYNC in one hop.
     check(sm, "orphan", "master", tm, [("T34", "*", "ORPHANED"), ("T35", "ORPHANED", "UNCONFIGURED|CONFIGURED"),
                                        ("T4", "UNCONFIGURED|CONFIGURED", "PENDING_RESTART"),
-                                       ("T6", "PENDING_RESTART", "CONFIGURED"), ("T9", "CONFIGURED", "IN_SYNC")],
+                                       ("T6", "PENDING_RESTART", "CONFIGURED|IN_SYNC"),
+                                       ("T9", "CONFIGURED|IN_SYNC|PENDING_RESTART", "IN_SYNC")],
           f"master {s} at the end")
     if s != "IN_SYNC":
         sm.recover("orphan")
