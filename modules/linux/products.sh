@@ -45,6 +45,10 @@ cfg = {
     "install_path": e["FB_ROOT"], "port": int(e["FB_PORT"]), "version": "auto",
     "restart": {"services": [{"windows_name": "FirebirdServerDefaultInstance",
                               "linux_unit": e["FB_UNIT"]}]},
+    # The local API restarts what firebird.update.services lists; without it
+    # fbagent takes its default list, every HQbird instance of the host.
+    "update": {"enabled": False, "apply_automatically": False,
+               "services": [{"windows_name": "FirebirdServerDefaultInstance", "linux_unit": e["FB_UNIT"]}]},
   },
   "goafts": {
     "agent_id": aid, "server_url": "",

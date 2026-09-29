@@ -62,6 +62,12 @@ function Fbagent-WriteConfig([string]$dir, [string]$fbRoot, [int]$fbPort, [strin
     firebird = [pscustomobject]@{
       install_path = $fbRoot; port = $fbPort; version = "auto"
       restart = [pscustomobject]@{ services = @([pscustomobject]@{ windows_name = $fbService; linux_unit = "firebird" }) }
+      # The local API stops and starts what firebird.update.services lists.
+      # Without it fbagent takes its default list, every HQbird instance of
+      # the host: a restart of one instance bounced all of them (V-14,
+      # dellg15, 2026-09-29).
+      update = [pscustomobject]@{ enabled = $false; apply_automatically = $false
+        services = @([pscustomobject]@{ windows_name = $fbService; linux_unit = "firebird" }) }
     }
     goafts = [pscustomobject]@{
       agent_id = $aid; server_url = ""
@@ -170,6 +176,28 @@ function Fbagent-Leftovers([string]$dir, [string]$service) {
 }
 
 # ----------------------------------------------------------- hqclusternode --
+# Inbound rules for the test bed's own ports (node API, RCM ingest). A
+# Windows host opens nothing by itself: without them no peer reaches the
+# node. Named "hqtb-<what>-<port>", removed by the matching uninstall.
+function Firewall-Open([string]$what, [int]$port) {
+  $name = "hqtb-$what-$port"
+  if (-not (Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -DisplayName $name -Direction Inbound -Protocol TCP -LocalPort $port -Action Allow | Out-Null
+    Log "firewall: inbound TCP $port open ($name)"
+  }
+}
+
+function Firewall-Close([string]$what, [int]$port) {
+  Get-NetFirewallRule -DisplayName "hqtb-$what-$port" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+}
+
+function Node-Port([string]$conf) {
+  try { $c = Read-Json $conf } catch { return 0 }
+  $la = [string]$c.listen_addr
+  if ($la -match ':(\d+)$') { return [int]$Matches[1] }
+  return 0
+}
+
 function Node-Install([string]$stage, [string]$dir, [string]$dbRoot) {
   $bin = Join-Path $stage "bin\hqclusternode.exe"
   $conf = Join-Path $stage "conf\node.json"
@@ -194,12 +222,16 @@ function Node-Install([string]$stage, [string]$dir, [string]$dbRoot) {
   if ($r.Code -ne 0) { Die "hqclusternode svc start failed" }
   $ok = Wait-Until 60 { (Invoke-Native $exe @("healthcheck", "-config", $cfg, "-certs", $certs) -Quiet).Code -eq 0 }
   if (-not $ok) { Die "node does not answer /v1/health" }
+  $port = Node-Port $cfg
+  if ($port -gt 0) { Firewall-Open "node" $port }
   Log "node healthy"
 }
 
 function Node-Uninstall([string]$dir) {
   $exe = Join-Path $dir "hqclusternode.exe"
   $cfg = Join-Path $dir "node.json"
+  $port = Node-Port $cfg
+  if ($port -gt 0) { Firewall-Close "node" $port }
   if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $cfg)) {
     Invoke-Native $exe @("svc", "stop", "-config", $cfg) -Quiet | Out-Null
     $r = Invoke-Native $exe @("svc", "uninstall", "-config", $cfg)
@@ -222,6 +254,16 @@ function Rcm-Install([string]$stage, [string]$dir) {
   Log "hqbirdrcm -> $dir"
   $exe = Join-Path $dir "hqbirdrcm.exe"
   $cfg = Join-Path $dir "rcm.json"
+  # The RCM service name is fixed ("hqbirdrcm"). One left by an older stand
+  # in another folder is stopped and deleted; its folder stays (owner
+  # decision R21).
+  $old = Get-CimInstance Win32_Service -Filter "Name='hqbirdrcm'" -ErrorAction SilentlyContinue
+  if ($old -and $old.PathName -notlike "*$dir*") {
+    Warn "service hqbirdrcm of another folder ($($old.PathName)): deleting the service, keeping its folder"
+    Stop-Service -Name "hqbirdrcm" -Force -ErrorAction SilentlyContinue
+    & sc.exe delete "hqbirdrcm" | Out-Null
+    Start-Sleep -Seconds 2
+  }
   if (Test-Path -LiteralPath $cfg) {
     Invoke-Native $exe @("svc", "stop", "-config", $cfg) -Quiet | Out-Null
     Invoke-Native $exe @("svc", "uninstall", "-config", $cfg) -Quiet | Out-Null
@@ -234,10 +276,12 @@ function Rcm-Install([string]$stage, [string]$dir) {
   if ((Invoke-Native $exe @("svc", "install", "-config", $cfg)).Code -ne 0) { Die "hqbirdrcm svc install failed" }
   if ((Invoke-Native $exe @("svc", "start", "-config", $cfg)).Code -ne 0) { Die "hqbirdrcm svc start failed" }
   if (-not (Wait-Until 30 { (Get-Service -Name "hqbirdrcm").Status -eq "Running" })) { Die "hqbirdrcm service is not running" }
+  Firewall-Open "rcm" 7443
   Log "rcm running"
 }
 
 function Rcm-Uninstall([string]$dir) {
+  Firewall-Close "rcm" 7443
   $exe = Join-Path $dir "hqbirdrcm.exe"
   $cfg = Join-Path $dir "rcm.json"
   if ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $cfg)) {

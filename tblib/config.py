@@ -11,7 +11,8 @@ import re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(ROOT, "config", "testbed.local.json")
-STATE_DIR = os.environ.get("TB_STATE_DIR") or os.path.join(ROOT, "state")
+# Absolute: builds run in other folders (fb-loadgen) and write here.
+STATE_DIR = os.path.abspath(os.environ.get("TB_STATE_DIR") or os.path.join(ROOT, "state"))
 
 PLACEHOLDER = re.compile(r"<[^<>]+>")
 
@@ -23,8 +24,9 @@ class ConfigError(Exception):
 # Port 0 means "find out on the host": the Firebird port from RemoteServicePort
 # in firebird.conf (3050 when not set), the fbagent port from local_api.listen
 # of an existing agent (13055, fbagent's own default, when not set).
+# firebird.engine: "2.5", "3.0", "4" or "5"; empty = the node finds it.
 LINUX_DEFAULTS = {
-    "firebird": {"root": "/opt/firebird", "port": 0, "service": ""},
+    "firebird": {"root": "/opt/firebird", "port": 0, "service": "", "engine": ""},
     "fbagent": {"mode": "install", "dir": "/opt/hqbird-fbagent", "port": 0,
                 "instance_id": "", "service": "hqbirdfbagent"},
     "paths": {"work": "/opt/hqtb", "node": "/opt/hqclusternode",
@@ -32,7 +34,8 @@ LINUX_DEFAULTS = {
 }
 
 WINDOWS_DEFAULTS = {
-    "firebird": {"root": "C:\\HQbird\\Firebird50", "port": 0, "service": ""},
+    "firebird": {"root": "C:\\HQbird\\Firebird50", "port": 0, "service": "", "engine": "",
+                 "copy_of": ""},     # a second instance: copy of this root (06-instance)
     "fbagent": {"mode": "existing", "dir": "C:\\hqtb\\fbagent", "port": 0,
                 "instance_id": "", "service": "HQbirdFBAgent"},
     "paths": {"work": "C:\\hqtb", "node": "C:\\hqclusternode",

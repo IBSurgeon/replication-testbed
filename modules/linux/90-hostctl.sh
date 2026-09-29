@@ -31,6 +31,13 @@
 #   90-hostctl.sh db-new-guid --db FILE [--fb-root /opt/firebird] [--port 3050] [--fb-service UNIT]
 #   90-hostctl.sh rcm-api     --method GET --path /v1/alerts [--body-b64 B64] [--then-restart false]
 #                             (RCM operator API on this host, Digest login from the secrets)
+#   90-hostctl.sh hold-tx     --db FILE --seconds N [--fb-root /opt/firebird] [--port 3050]
+#                             (a writing transaction left open N seconds in the background, then rolled back)
+#   90-hostctl.sh node-conf-set --node-dir DIR --key firebird.replconf_valid_till --value-b64 B64
+#                             (one key of node.json; "" removes it; restart the node to apply)
+#   90-hostctl.sh file-put    --path FILE --content-b64 B64   (keeps FILE.tb-bak once)
+#   90-hostctl.sh file-restore --path FILE                    (FILE.tb-bak back)
+#   90-hostctl.sh file-copy   --from FILE --to FILE           (owner and mode kept)
 #
 # Results come as one "TBRESULT <json>" line.
 source "$(dirname "$0")/common.sh"
@@ -348,6 +355,65 @@ PY
     result "{\"replaced\":\"$DB\"}"
     ;;
 
+  hold-tx)
+    # A transaction that has written and stays open: isql inserts a row, then
+    # waits in "shell sleep" without committing, then rolls back and exits.
+    load_secrets
+    DB="$(arg db)"; [[ -f "$DB" ]] || die "no database $DB"
+    SECS="$(arg seconds 120)"
+    isql_q "$DB" "recreate table TB_HOLD (ID integer not null primary key); commit;" >/dev/null 2>&1 || true
+    ISQL="$(fb_tool "$FB_ROOT" isql)"
+    printf 'set autoddl off;\ninsert into TB_HOLD values (%s);\nshell sleep %s;\nrollback;\n' "$RANDOM" "$SECS" |
+      setsid nohup "$ISQL" -q "localhost/$PORT:$DB" >/tmp/tb-hold-tx.log 2>&1 &
+    echo $! >/tmp/tb-hold-tx.pid
+    result "{\"holding\":\"$DB\",\"seconds\":$SECS,\"pid\":$!}"
+    ;;
+
+  node-conf-set)
+    F="$NODE_DIR/node.json"; [[ -f "$F" ]] || die "no $F"
+    K="$(arg key)"; V="$(printf '%s' "$(arg value_b64)" | base64 -d)"
+    python3 - "$F" "$K" "$V" <<'PY'
+import json, os, sys
+path, key, value = sys.argv[1:4]
+c = json.load(open(path, encoding="utf-8"))
+d = c
+parts = key.split(".")
+for p in parts[:-1]:
+    d = d.setdefault(p, {})
+if value == "":
+    d.pop(parts[-1], None)
+else:
+    d[parts[-1]] = value
+tmp = path + ".tbtmp"
+st = os.stat(path)
+json.dump(c, open(tmp, "w", encoding="utf-8"), indent=2)
+os.chmod(tmp, st.st_mode & 0o777)
+os.chown(tmp, st.st_uid, st.st_gid)
+os.replace(tmp, path)
+PY
+    result "{\"key\":\"$K\"}"
+    ;;
+
+  file-put)
+    P="$(arg path)"; [[ -n "$P" ]] || die "--path is required"
+    [[ ! -e "$P" || -e "$P.tb-bak" ]] || cp -p "$P" "$P.tb-bak"
+    printf '%s' "$(arg content_b64)" | base64 -d >"$P.tbtmp"
+    [[ ! -e "$P" ]] || { chown --reference="$P" "$P.tbtmp"; chmod --reference="$P" "$P.tbtmp"; }
+    mv -f "$P.tbtmp" "$P"
+    result "{\"put\":\"$P\"}"
+    ;;
+
+  file-restore)
+    P="$(arg path)"; [[ -e "$P.tb-bak" ]] || die "no $P.tb-bak"
+    mv -f "$P.tb-bak" "$P"
+    result "{\"restored\":\"$P\"}"
+    ;;
+
+  file-copy)
+    cp -p "$(arg from)" "$(arg to)"
+    result "{\"copied\":\"$(arg to)\"}"
+    ;;
+
   rcm-api)
     read_secrets
     python3 - "$(arg method GET)" "$(arg path /v1/alerts)" "$(arg body_b64)" "$(arg then_restart false)" <<'PY'
@@ -380,5 +446,5 @@ print("TBRESULT " + json.dumps({"status": st, "body": b}))
 PY
     ;;
 
-  *) die "usage: 90-hostctl.sh secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|nbackup-lock|fb-tool|db-new-guid|rcm-api" ;;
+  *) die "usage: 90-hostctl.sh secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|nbackup-lock|fb-tool|db-new-guid|rcm-api|hold-tx|node-conf-set|file-put|file-restore|file-copy" ;;
 esac

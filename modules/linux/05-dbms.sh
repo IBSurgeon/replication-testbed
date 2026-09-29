@@ -60,7 +60,17 @@ case "$CMD" in
     fi
     UNIT="$(detect_fb_unit)"; [[ -n "$UNIT" ]] || die "no Firebird systemd unit after install"
     systemctl enable --now "$UNIT" >/dev/null 2>&1 || true
-    wait_until 60 isql_ok "$TB_FB_PASSWORD" || true
+    # Fresh HQbird 2.5/3.0: the server stops at its first start ("Replication
+    # server initialization error", "Valid date is expired!") while DataGuard
+    # has not written its replconf file yet, and systemd does not start it
+    # again. Start it again until one of the passwords logs in.
+    login_ok() { isql_ok "$TB_FB_PASSWORD" || { [[ -n "${TB_FB_INITIAL_PASSWORD:-}" ]] && isql_ok "$TB_FB_INITIAL_PASSWORD"; }; }
+    for try in 1 2 3 4 5 6; do
+      wait_until 20 login_ok && break
+      log "Firebird does not answer (try $try): start $UNIT again"
+      systemctl restart "$UNIT" >/dev/null 2>&1 || true
+      sleep 10
+    done
     if ! isql_ok "$TB_FB_PASSWORD"; then
       [[ -n "${TB_FB_INITIAL_PASSWORD:-}" ]] || die "SYSDBA login failed and TB_FB_INITIAL_PASSWORD is not set"
       isql_ok "$TB_FB_INITIAL_PASSWORD" || die "SYSDBA login fails with both passwords"

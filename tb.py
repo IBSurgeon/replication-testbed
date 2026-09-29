@@ -87,16 +87,30 @@ def cmd_hosts(cl, a):
     import base64
     import threading
     enc = lambda v: base64.b64encode(v.encode()).decode()
-    url = (cl.cfg.raw.get("firebird_installer") or {}).get("linux_url", "")
+    inst = cl.cfg.raw.get("firebird_installer") or {}
     names = cl.cfg.select(a.hosts)
+
+    def installer_url(n):
+        # One installer script per engine (firebird.engine), else linux_url.
+        return (inst.get("linux_urls") or {}).get(cl.fb_engine(n)) or inst.get("linux_url", "")
     results = {}
 
     def one(n):
         h = cl.h(n)
         if h["os"] == "linux":
-            args = {"installer_url_b64": enc(url), "root_b64": enc(h["firebird"]["root"])}
+            args = {"installer_url_b64": enc(installer_url(n)), "root_b64": enc(h["firebird"]["root"])}
             rc, res, _, _ = cl.module(n, "05-dbms", "install", args, check=False)
         else:
+            src = h["firebird"].get("copy_of", "")
+            if src:
+                # A second instance on the host: a copy of an installed root
+                # with its own port and service (06-instance).
+                rc, res, _, _ = cl.module(n, "06-instance", "create", {
+                    "source": src, "target": h["firebird"]["root"], "port": cl.fb_port(n),
+                    "service": h["firebird"]["service"]}, check=False)
+                if rc != 0:
+                    results[n] = (rc, res)
+                    return
             args = {"fb_root": h["firebird"]["root"], "fb_service": h["firebird"]["service"],
                     "port": cl.fb_port(n)}
             rc, res, _, _ = cl.module(n, "05-dbms", "check", args, check=False)

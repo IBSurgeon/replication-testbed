@@ -71,7 +71,17 @@ detect_fb_unit() {
   for u in "${units[@]}"; do
     [[ "$u" == "firebird.service" ]] && { echo firebird; return; }
   done
-  if [[ ${#units[@]} -eq 1 ]]; then echo "${units[0]%.service}"; return; fi
+  # Templates (firebird-classic@.service) run one process per connection;
+  # the unit to restart is the other one. HQbird 3.0 on Linux ships
+  # firebird-superserver.service next to firebird-classic@.service.
+  local plain=() on=()
+  for u in "${units[@]}"; do
+    [[ "$u" == *@.service ]] && continue
+    plain+=("$u")
+    [[ "$(systemctl is-enabled "$u" 2>/dev/null)" == enabled ]] && on+=("$u")
+  done
+  if [[ ${#on[@]} -eq 1 ]]; then echo "${on[0]%.service}"; return; fi
+  if [[ ${#plain[@]} -eq 1 ]]; then echo "${plain[0]%.service}"; return; fi
   echo ""
 }
 

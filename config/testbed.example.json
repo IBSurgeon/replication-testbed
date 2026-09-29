@@ -25,7 +25,9 @@
 
   "firebird_installer": {
     "_readme": "Used by 'hosts prepare' on Linux hosts without Firebird: an HQbird/Firebird installer script URL.",
-    "linux_url": "<https URL of the HQbird Linux installer script>"
+    "linux_url": "<https URL of the HQbird Linux installer script>",
+    "_linux_urls": "Optional: one installer per firebird.engine of a host; linux_url is the fallback.",
+    "linux_urls": { "5": "<installer URL for HQbird 5>", "3.0": "<installer URL for HQbird 3.0>", "2.5": "<installer URL for HQbird 2.5>" }
   },
 
   "digitalocean": {
@@ -33,7 +35,7 @@
     "token_file": "<path to a file with the DigitalOcean API token>",
     "region": "<region, e.g. nyc3>",
     "size": "s-4vcpu-8gb",
-    "image": "ubuntu-24-04-x64",
+    "image": "ubuntu-22-04-x64",
     "ssh_key_fingerprint": "<MD5 fingerprint of an ssh key registered in DigitalOcean>",
     "vpc_uuid": "",
     "tag": "replication-testbed",
@@ -104,7 +106,8 @@
       "node_id": "tb-master",
       "node_port": 7051,
       "_ports": "firebird.port / fbagent.port: 0 = from the host (RemoteServicePort in firebird.conf, else 3050; local_api.listen of an existing agent, else 13055).",
-      "firebird": { "root": "", "port": 0, "service": "" },
+      "_engine": "firebird.engine: 2.5, 3.0, 4 or 5; empty = the node finds it. 2.5/3.0: the node uses its default replconf file.",
+      "firebird": { "root": "", "port": 0, "service": "", "engine": "" },
       "fbagent": { "mode": "install", "dir": "", "port": 0, "instance_id": "", "service": "" },
       "paths": { "work": "", "node": "", "rcm": "", "db_root": "" }
     },

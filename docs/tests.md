@@ -191,6 +191,40 @@ a reinit brings db1 to `IN_SYNC`. No load: fb-loadgen is not needed.
 python tb.py test upgrade --old-dist state/dist-2027.1.15
 ```
 
+## engineparams
+
+Engine replication keys (`GET/POST /v1/engine/params`) on every engine: the
+keys come from the node's catalog (4/5: `journal_*`, 2.5/3.0: `log_*`). On
+the master a value for one database (dry run first), no Firebird restart by
+the node, a restart through the API, the node default for the others, two
+scans in a row (the second changes nothing). On each replica a node default
+and a restart in its window; a 2.5/3.0 replica has no editable key yet
+(V-22: SKIP); a 4.0 replica has no `cascade_replication`. Every change is
+undone.
+
+## legacy
+
+HQbird 2.5/3.0 through the replconf plugin; `firebird.engine` 2.5 or 3.0 on
+every node host, Linux hosts for now. `dbs prepare` already activated the
+plugin on every node (`POST /v1/replconf/activate`: the node's plugin
+2.1.0, `replconf.properties`, one restart). Steps (`--steps`):
+
+| Step | What |
+|---|---|
+| `activation` | the node's file is its default `<root>/replconf.hqcluster.hqbird`, `replconf.properties` points to it, plugin 2.1.0; the files the engine uses and its systemd unit are recorded |
+| `publications` | `POST /v1/publication/sync` answers 409 `no_publications` |
+| `flow` | load, stop, every replica matches |
+| `restart` | the master's Firebird restarted during the load |
+| `busy_writers` | a reinit while a transaction that has written stays open (`hold-tx`) fails with `reinit_busy_writers`; once it is gone the reinit goes through |
+| `properties` | a foreign edit of `replconf.properties` (to a copy of the node's file) raises `replconf_properties_changed`; the node does not repair it; restored at the end |
+| `valid_date` | `firebird.replconf_valid_till` 20 days ahead raises `replconf_expiring`; the old date comes back (never a past one: HQbird then refuses every attach) |
+| `turn_to_normal` | a replica database turned to normal, then seeded again |
+
+```bash
+python tb.py test legacy
+python tb.py test legacy --steps activation,flow
+```
+
 ## Not ported yet
 
 From `hqcluster-node/examples`, still to move here as test bed tests:

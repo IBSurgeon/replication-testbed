@@ -24,6 +24,7 @@ class TbError(Exception):
 
 
 FB_PORT_DEFAULT = 3050
+LEGACY_ENGINES = ("2.5", "3.0")     # HQbird through the replconf plugin
 FBAGENT_PORT_DEFAULT = 13055     # fbagent listens here when local_api.listen is not set
 
 
@@ -129,6 +130,10 @@ class Cluster:
                 or f"tb-{name}-{self.fb_port(name)}")
 
     # --- common module arguments ---------------------------------------------
+    def fb_engine(self, name):
+        """firebird.engine of the host: "2.5", "3.0", "4", "5" or "" (auto)."""
+        return str(self.h(name)["firebird"].get("engine") or "")
+
     def fb_service(self, name):
         h = self.h(name)
         return h["firebird"]["service"] or self.hstate(name).get("fb_unit", "")
@@ -136,7 +141,7 @@ class Cluster:
     def base_args(self, name):
         h = self.h(name)
         return {"fb_root": h["firebird"]["root"], "fb_port": self.fb_port(name),
-                "fb_service": self.fb_service(name),
+                "fb_service": self.fb_service(name), "fb_engine": self.fb_engine(name),
                 "fbagent_mode": h["fbagent"]["mode"], "fbagent_dir": h["fbagent"]["dir"],
                 "fbagent_port": self.fbagent_port(name),
                 "fbagent_instance": self.fbagent_instance(name),
@@ -305,6 +310,7 @@ class Cluster:
             limits["mailbox_pending_ceiling"] = 256
         limits.update(cfg.limits)
         svc = self.fb_service(name)
+        engine = self.fb_engine(name)
         fbj = {"root": root, "user": cfg.secrets.get("firebird_user", "SYSDBA"),
                "password": cfg.secrets.get("firebird_password", ""), "port": self.fb_port(name),
                "replication_conf": hst.join(root, "replication.conf"),
@@ -316,6 +322,12 @@ class Cluster:
                "service_name": svc, "restart_timeout_sec": 300}
         if h["os"] == "linux":
             fbj["systemd_unit"] = svc
+        if engine:
+            fbj["engine"] = engine
+        if engine in LEGACY_ENGINES:
+            # HQbird 2.5/3.0: the node's replconf file is its default,
+            # <root>/replconf.hqcluster.hqbird (hqcluster-node plan, U-8).
+            del fbj["replication_conf"]
         w = cfg.windows
         return {
             "node_id": h["node_id"], "role": role, "listen_addr": f":{h['node_port']}",

@@ -11,7 +11,7 @@ import threading
 import time
 
 from . import config as C
-from .cluster import FB_PORT_DEFAULT as C_FB_PORT_DEFAULT
+from .cluster import LEGACY_ENGINES, FB_PORT_DEFAULT as C_FB_PORT_DEFAULT
 from .cluster import FBAGENT_PORT_DEFAULT, Cluster, TbError, log
 
 
@@ -386,6 +386,12 @@ def wipe(cl, hosts):
         if not note_leftovers(n, rc, res, left):
             cl.hstate(n).pop("installed", None)
         cl.save()
+        h = cl.h(n)
+        if h["os"] == "windows" and h["firebird"].get("copy_of"):
+            rc, res, _, _ = cl.module(n, "06-instance", "remove", {
+                "target": h["firebird"]["root"], "service": h["firebird"]["service"]}, check=False)
+            if rc != 0:
+                left.append(f"[{n}] firebird copy {h['firebird']['root']}: {res}")
         remove_work(cl, n)
         w = cl.h(n)["paths"]["work"]
         if cl.h(n)["os"] == "linux":
@@ -434,11 +440,15 @@ def restart_firebird(cl, name, reason):
     wait_no_pending_restart(cl, name)
 
 
-def reinit(cl, db_id, replica, mode="standard", timeout=3600, refusal_timeout=600):
-    """Reinit one database to one replica; waits for the end. Returns the op."""
+def reinit(cl, db_id, replica, mode="standard", timeout=3600, refusal_timeout=600, overwrite_non_replica=False):
+    """Reinit one database to one replica; waits for the end. Returns the op.
+    overwrite_non_replica: the replica's file may be an ordinary database (a
+    replica turned to normal); without it the replica refuses."""
     to = cl.h(replica)["node_id"]
     body = {"to": to, "mode": mode, "ignore_window": True, "allow_restart": True,
             "hold_on_long_transactions": True}
+    if overwrite_non_replica:
+        body["overwrite_non_replica"] = True
     end_refusal = time.time() + refusal_timeout
     while True:
         st, resp = cl.api(cl.cfg.master, "POST", f"/v1/databases/{db_id}/reinit", body, check_status=False)
@@ -460,9 +470,38 @@ def reinit(cl, db_id, replica, mode="standard", timeout=3600, refusal_timeout=60
     return op
 
 
+def legacy(cl, name):
+    """HQbird 2.5/3.0 on this host (firebird.engine)."""
+    return cl.fb_engine(name) in LEGACY_ENGINES
+
+
+def activate_replconf(cl, name):
+    """HQbird 2.5/3.0: switch the engine to the node's replconf file (the
+    node's plugin, replconf.properties, one Firebird restart through
+    fbagent). Nothing to do when it is active already. Returns the plan."""
+    st, plan = cl.api(name, "POST", "/v1/replconf/activate", {"dry_run": True, "ignore_window": True}, check_status=False)
+    if st != 200:
+        raise TbError(f"[{name}] replconf activate (dry run): HTTP {st} {json.dumps(plan)[:400]}")
+    if not plan.get("restart"):
+        log(f"[{name}] replconf: active, plugin {plan.get('plugin_version')}")
+        return plan
+    log(f"[{name}] replconf: activate (install plugin: {plan.get('install_plugin')}, "
+        f"import {len((plan.get('import') or {}).get('imported') or [])} record(s)); Firebird restarts")
+    st, plan = cl.api(name, "POST", "/v1/replconf/activate", {"ignore_window": True}, timeout=900, check_status=False)
+    if st != 200 or not plan.get("done") or not (plan.get("active") or (plan.get("state") or {}).get("active")):
+        raise TbError(f"[{name}] replconf activate: HTTP {st} {json.dumps(plan)[:500]}")
+    log(f"[{name}] replconf: active, {plan.get('conf_path')} valid till {plan.get('valid_till')}, plugin {plan.get('plugin_version')}")
+    return plan
+
+
 def dbs_prepare(cl, count=None, subdir=None, seed=True):
     cfg = cl.cfg
     m = cfg.master
+    # HQbird 2.5/3.0: every node's engine reads the node's replconf file
+    # before any record the node writes can apply.
+    for n in cfg.node_hosts():
+        if legacy(cl, n):
+            activate_replconf(cl, n)
     count = count or cfg.dbs["count"]
     subdir = subdir or cfg.dbs["subdir"]
     a = cl.base_args(m)
@@ -474,13 +513,18 @@ def dbs_prepare(cl, count=None, subdir=None, seed=True):
     st, out = cl.api(m, "POST", "/v1/scansync", {})
     log(f"scansync: {out.get('status') if isinstance(out, dict) else out}")
     restart_firebird(cl, m, "test bed: databases prepared")
-    st, out = cl.api(m, "POST", "/v1/publication/sync", {})
     dbs = cl.test_dbs(subdir)
-    for d in dbs:
-        _, pub = cl.api(m, "GET", f"/v1/databases/{d['db_id']}/publication")
-        if not (pub or {}).get("publication_enabled"):
-            raise TbError(f"publication is not enabled on {d['path']}: {json.dumps(pub)[:300]}")
-    log(f"publication enabled on {len(dbs)} database(s)")
+    if legacy(cl, m):
+        # No publications on 2.5/3.0: the master record makes the engine
+        # write segments (the restart above opened the databases anew).
+        log(f"{len(dbs)} database(s): HQbird {cl.fb_engine(m)} has no publications")
+    else:
+        st, out = cl.api(m, "POST", "/v1/publication/sync", {})
+        for d in dbs:
+            _, pub = cl.api(m, "GET", f"/v1/databases/{d['db_id']}/publication")
+            if not (pub or {}).get("publication_enabled"):
+                raise TbError(f"publication is not enabled on {d['path']}: {json.dumps(pub)[:300]}")
+        log(f"publication enabled on {len(dbs)} database(s)")
     if seed:
         for r in cfg.replicas:
             for d in dbs:

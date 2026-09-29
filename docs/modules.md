@@ -77,6 +77,29 @@ it is not set) and, for an `existing` agent, the fbagent port from its
 agent gets 13055. A port set in the config must match what the host says, or
 `install` stops with both values.
 
+## Engine of a host
+
+`firebird.engine` ("2.5", "3.0", "4", "5"; empty: the node finds it) goes
+into `node.json`. For 2.5/3.0 `replication_conf` is left out, so the node
+uses its default replconf file. On Linux `hosts prepare` takes the installer
+from `firebird_installer.linux_urls[<engine>]`, else `linux_url`. The
+fbagent the test bed installs restarts only this instance:
+`firebird.update.services` names its service (without it fbagent acts on
+every HQbird instance of the host).
+
+## 06-instance — a second instance on a Windows host (Windows)
+
+For a pair on one Windows host (a copy next to the installed root, like
+`Firebird30` + `Firebird30R`). A host with `firebird.copy_of` set gets it in
+`hosts prepare`: the root is copied (no logs), the copy gets its own
+`RemoteServicePort` (`firebird.port`), `IpcName`, `RemotePipeName` (2.5 also
+`RemoteAuxPort = 0`) and the service `firebird.service` (manual start). An
+HQbird 2.5/3.0 copy reads a copy of the source's replconf file, never the
+source's own. `hosts wipe` removes only a copy the test bed made (marker
+`.hqtb-instance`). The install also opens inbound rules for the node port
+and RCM 7443 (`hqtb-*`, removed by uninstall) and deletes a `hqbirdrcm`
+service of another folder, keeping the folder. Not run on a host yet.
+
 ## 30-dbs — test databases
 
 `prepare` copies the source (default: Firebird's EMPLOYEE example) to
@@ -87,7 +110,9 @@ and runs `-F` on every copy, so each copy is consistent and has its own GUID.
 
 tb.py then does the replication part through the node API: `POST /v1/scansync`,
 `POST /v1/firebird/restart`, `POST /v1/publication/sync`, and a standard
-reinit of every database to every replica. `dbs remove` stops the load,
+reinit of every database to every replica. On HQbird 2.5/3.0 it first
+activates the replconf plugin on every node (`POST /v1/replconf/activate`)
+and skips the publication step (these engines have none). `dbs remove` stops the load,
 removes the files on the master and the replicas, runs scansync with
 `allow_shrink`, restarts Firebird, and forgets the ORPHANED records.
 
@@ -132,5 +157,7 @@ node's `POST /v1/peer/segments`, with this node's certificate), `node-on-file`
 (stop or kill the node when a `.delta` lock file appears or goes away),
 `nbackup-unlock`, `db-new-guid` (the master file replaced by an nbackup copy
 with a new GUID), `rcm-api` (RCM operator API on 127.0.0.1:7444, Digest login
-from the secrets). `node-api --addr HOST:PORT` calls another node's API with
+from the secrets). For `legacy` (Linux): `hold-tx` (a writing transaction
+left open N seconds, then rolled back), `node-conf-set` (one key of
+node.json), `file-put` / `file-restore` / `file-copy`. `node-api --addr HOST:PORT` calls another node's API with
 this node's certificate.

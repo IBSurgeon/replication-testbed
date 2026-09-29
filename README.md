@@ -52,6 +52,7 @@ python tb.py test datacheck
 python tb.py test states                     # every state and transition of one database
 python tb.py test gaps                       # section 12 gaps of the state machine: real or not
 python tb.py test engineparams               # engine keys: per database, node default, restart rules
+python tb.py test legacy                     # HQbird 2.5/3.0: replconf plugin, flow, reinit, properties, valid date
 python tb.py test upgrade --old-dist DIR     # 2027.1.x -> this build over its state (fresh install or last)
 python tb.py dbs remove
 python tb.py uninstall --source local        # fails with a list if anything is left
@@ -74,6 +75,9 @@ python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on th
 | 10 | test | `test states` | every state and transition (T1-T36) of one database, read from the node's state journal |
 | 11 | test | `test gaps` | the eight possible gaps of the state machine (its section 12): real problem or not |
 | 12 | test | `test upgrade` | a 2027.1.x node upgraded to this build over its state: migration, an interrupted reinit's lock |
+| 13 | test | `test engineparams` | engine replication keys from the node's catalog: per database, node default, restart rules |
+| 14 | test | `test legacy` | HQbird 2.5/3.0 through the replconf plugin: activation, flow, restart, reinit without replay, properties, valid date, turn to normal |
+| – | `06-instance` | `hosts prepare` (Windows, `firebird.copy_of`) | a second Firebird instance on a Windows host: a copy of a root with its own port and service |
 | – | `90-hostctl` | used by tb.py and tests | node API calls, service control, row counts, limbo check, firewall block, replica control files, state journal, replication.log and peer segment injection |
 
 Details: [docs/modules.md](docs/modules.md). Tests: [docs/tests.md](docs/tests.md).

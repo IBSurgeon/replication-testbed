@@ -1,5 +1,6 @@
 """Engine replication keys (hqcluster-node plan section 6, step 8.9) on
-Firebird 4/5: GET/POST /v1/engine/params on the master and the replicas.
+every engine: GET/POST /v1/engine/params on the master and the replicas.
+The keys come from the node's catalog (4/5: journal_*, 2.5/3.0: log_*).
 
 Master: a value for some databases rewrites replication.conf and marks every
 database PENDING_RESTART, but the node does not restart Firebird itself; a
@@ -40,6 +41,10 @@ def _value(doc, db_id, key):
     raise TbError(f"no database {db_id} in the engine params")
 
 
+def _read_only(p):
+    return p.get("managed") or p.get("locked") or p.get("danger")
+
+
 def _post(cl, host, body):
     st, r = cl.api(host, "POST", "/v1/engine/params", body, check_status=False)
     if st != 200:
@@ -59,10 +64,12 @@ def run(cl, a):
     if len(dbs) < 2:
         raise TbError("engine params want at least two test databases (tb.py dbs prepare --count 2)")
     doc = _params(cl, master)
-    count_key = "journal_segment_count"
-    if not any(p["name"] == count_key for p in doc["catalog"]):
-        raise TbError(f"[{master}] catalog has no {count_key}: engine {doc.get('engine')} is not 4/5")
-    log(f"master engine {doc['engine']}, {len(doc['databases'])} database(s), section={doc['section']}")
+    # The segment count under the engine's own name: journal_segment_count
+    # on 4/5, log_segment_count on 2.5/3.0.
+    count_key = next((p["name"] for p in doc["catalog"] if p.get("logical") == "segment_count" and not _read_only(p)), None)
+    if not count_key:
+        raise TbError(f"[{master}] catalog of engine {doc.get('engine')} has no editable segment count")
+    log(f"master engine {doc['engine']}, key {count_key}, {len(doc['databases'])} database(s), section={doc['section']}")
     first, rest = dbs[0]["db_id"], [d["db_id"] for d in dbs[1:]]
     was = _value(doc, first, count_key)
 
@@ -91,10 +98,26 @@ def run(cl, a):
             _value(doc, i, count_key).get("value") == "96" for i in rest)
         res.record("master: node default", "PASS" if ok else "FAIL", note=str(r)[:300])
 
+        # Two scans in a row: the second finds nothing to change.
+        cl.api(master, "POST", "/v1/scansync", {})
+        st, out = cl.api(master, "POST", "/v1/scansync", {})
+        res.record("master: second scan changes nothing", "PASS" if (out or {}).get("status") == "REPLCONFUNCHANGED" else "FAIL",
+                   note=str((out or {}).get("status")))
+
         # Replicas: a node default for all databases, restart in the window.
         for rep in pick_replicas(cl, a.replicas):
             rdoc = _params(cl, rep)
-            if not any(p["name"] == "apply_idle_timeout" for p in rdoc["catalog"]):
+            names = {p["name"] for p in rdoc["catalog"]}
+            if rdoc.get("engine") == "4":
+                res.record(f"[{rep}] 4.0 replica has no cascade_replication",
+                           "FAIL" if "cascade_replication" in names else "PASS")
+            editable = [p["name"] for p in rdoc["catalog"] if not _read_only(p)]
+            if not editable:
+                # HQbird 2.5/3.0: no replica key has a known side yet (V-22).
+                res.record(f"[{rep}] replica node default", "SKIP",
+                           note=f"engine {rdoc.get('engine')}: no editable replica key")
+                continue
+            if "apply_idle_timeout" not in editable:
                 res.record(f"[{rep}] replica catalog", "FAIL", note="no apply_idle_timeout")
                 continue
             r = _post(cl, rep, {"target": {"node_default": True}, "set": {"apply_idle_timeout": "20"}})
@@ -113,7 +136,8 @@ def run(cl, a):
             back = _value(_params(cl, master), first, count_key)
             res.record("master unset", "PASS" if back.get("value") == was.get("value") else "FAIL", note=str(back))
             for rep in pick_replicas(cl, a.replicas):
-                _post(cl, rep, {"target": {"node_default": True}, "unset": ["apply_idle_timeout"]})
+                if any(p["name"] == "apply_idle_timeout" and not _read_only(p) for p in _params(cl, rep)["catalog"]):
+                    _post(cl, rep, {"target": {"node_default": True}, "unset": ["apply_idle_timeout"]})
             cl.api(master, "POST", "/v1/firebird/restart", {"ignore_window": True, "reason": "tb engineparams undo"},
                    check_status=False, timeout=a.restart_timeout)
         except TbError as e:
