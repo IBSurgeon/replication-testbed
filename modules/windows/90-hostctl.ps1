@@ -18,6 +18,7 @@
 #   90-hostctl.ps1 node-on-file --node-dir DIR --path FILE --event locked|unlocked --action stop|kill|kill-stay [--timeout 900] [--delay SEC]
 #   90-hostctl.ps1 nbackup-unlock --db FILE [--fb-root DIR] [--port 3050]
 #   90-hostctl.ps1 nbackup-lock   --db FILE [--fb-root DIR] [--port 3050]
+#   90-hostctl.ps1 fb-tool        --name nbackup --state off|on [--fb-root DIR]
 #   90-hostctl.ps1 db-new-guid  --db FILE --fb-service NAME [--fb-root DIR] [--port 3050]
 #   90-hostctl.ps1 rcm-api      --method GET --path /v1/alerts [--body-b64 B64] [--then-restart false]
 #   (the same commands as 90-hostctl.sh; see there what each one is for)
@@ -268,6 +269,18 @@ order by 1;
     Result @{ unlocked = $db; delta_left = (Test-Path -LiteralPath "$db.delta") }
   }
 
+  "fb-tool" {
+    $n = Arg $A "name"
+    if (-not $n) { Die "--name is required" }
+    $t = Fb-Tool $FbRoot $n
+    switch (Arg $A "state") {
+      "off" { if (Test-Path -LiteralPath $t) { Move-Item -LiteralPath $t -Destination "$t.tb-off" -Force } }
+      "on"  { if (Test-Path -LiteralPath "$t.tb-off") { Move-Item -LiteralPath "$t.tb-off" -Destination $t -Force } }
+      default { Die "--state off|on" }
+    }
+    Result @{ tool = $t; present = (Test-Path -LiteralPath $t) }
+  }
+
   "nbackup-lock" {
     Load-Secrets
     $db = Arg $A "db"
@@ -327,5 +340,5 @@ order by 1;
     Result @{ status = $st; body = $b }
   }
 
-  default { Die "usage: 90-hostctl.ps1 secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|nbackup-lock|db-new-guid|rcm-api" }
+  default { Die "usage: 90-hostctl.ps1 secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|nbackup-lock|fb-tool|db-new-guid|rcm-api" }
 }

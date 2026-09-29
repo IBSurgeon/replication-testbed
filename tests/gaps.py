@@ -25,8 +25,8 @@ Found after the v2 merge (hqcluster-node docs/v2-gaps-fix-plan.md):
                reinit waits for the replica: the next start must not run
                nbackup -N again; an operator backup taken then keeps its lock
   5c second-restart  the node restarted again before its unlock of an
-               interrupted reinit succeeded (Firebird down): the lock is
-               still released once Firebird is back
+               interrupted reinit succeeded (nbackup taken away for that
+               time): the lock is still released once nbackup is back
   4b two-stale  two replicas refuse as stale_generation; a reinit to one
                must leave the other NEEDS_REINIT and frozen (a restart too)
   C5 generation  a reinit of an IN_SYNC replica: the replica generation
@@ -177,14 +177,16 @@ def g_frozen(sm):
     # master's own generation update; when it lands early the replica never
     # holds a newer image and no 410 ever comes. Retry the setup once — the
     # second attempt usually lands the window.
-    if not sm.wait(sm.m, "NEEDS_REINIT", 60):
+    # sm.wait returns the state it saw last ("NEEDS_REINIT/reinit_scheduled"
+    # carries a reason), never a false value: test the prefix.
+    if not sm.wait(sm.m, "NEEDS_REINIT", 60).startswith("NEEDS_REINIT"):
         note += "; retry (the first crash missed the window)"
         note2 = stale_setup(sm, rep)
         note = f"{note}; {note2}"
     sm.load_on()
     try:
         s = sm.wait(sm.m, "NEEDS_REINIT", 300)
-        if s != "NEEDS_REINIT":
+        if not s.startswith("NEEDS_REINIT"):
             setup_failed(sm, 4, f"master is {s}, no stale_generation; {note}")
             return
         a0, arch0 = int(sm.ledger(rep2).get("last_acked") or 0), newest_archived(sm)
@@ -378,9 +380,10 @@ def g_crash_unlocked(sm):
 
 def g_second_restart(sm):
     """5c: the node restarted a second time before its unlock of an
-    interrupted reinit succeeded (Firebird down). Before the fix the first
-    start cleared the op phase, the only witness, and the second start
-    forgot the lock."""
+    interrupted reinit succeeded. Before the fix the first start cleared the
+    op phase, the only witness, and the second start forgot the lock.
+    nbackup is renamed away for that time: with Firebird merely stopped,
+    nbackup -N still worked (2026-09-29 run), so the first try succeeded."""
     cl, rep = sm.cl, sm.rep
     # kill-stay: systemd must not start the node again before Firebird is
     # down, or its first try would succeed.
@@ -390,25 +393,29 @@ def g_second_restart(sm):
     if not isinstance(t.result, dict):
         setup_failed(sm, "5c", f"the node was not killed under the lock (reinit HTTP {st})")
         return
-    fb_svc(cl, sm.m, "stop")
+    cl.hostctl(sm.m, "fb-tool", {"name": "nbackup", "state": "off"})
     try:
         node_svc(cl, sm.m, "start")
         wait_node(cl, sm.m, 180)
-        time.sleep(20)                  # the first try fails: no Firebird
+        time.sleep(20)                  # the first try fails: no nbackup
         first = bool(delta_left(cl, sm.path))
         node_svc(cl, sm.m, "restart")
         wait_node(cl, sm.m, 180)
         time.sleep(10)
     finally:
-        fb_svc(cl, sm.m, "start")
+        cl.hostctl(sm.m, "fb-tool", {"name": "nbackup", "state": "on"}, check=False)
+    if not first:
+        setup_failed(sm, "5c", "the lock was gone after the first start although nbackup was away")
+        return
     end = time.time() + 180             # the next try, a minute at most
     lock = delta_left(cl, sm.path)
     while lock and time.time() < end:
         time.sleep(5)
         lock = delta_left(cl, sm.path)
     sm.res.record("12.5c lock released after a second restart", "PASS" if not lock else "FAIL",
-                  note=(f"no .delta within 180 s of the Firebird start (locked after the first start: {first})"
-                        if not lock else f"confirmed: {lock[0]} still there 180 s after the Firebird start"))
+                  note=("still locked after the first start and the second one; no .delta within 180 s of "
+                        "nbackup coming back" if not lock else
+                        f"confirmed: {lock[0]} still there 180 s after nbackup came back"))
     if lock:
         cl.hostctl(sm.m, "nbackup-unlock", {"db": sm.path}, check=False)
 

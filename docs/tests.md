@@ -154,7 +154,7 @@ was seen. A "setup" FAIL means the situation could not be made.
 | 7 rcm-jobs | RCM jobs after an RCM restart | a verify job and a command, RCM restarted right after each; both must end, not stay running |
 | 8 rcm-disabled | DISABLED is visible in RCM | simulated "disabled"; RCM must show its `replication_disabled` alert (another alert of the database does not count) |
 | 5b crash-unlocked | operator backup keeps its lock after a crash past the unlock | master node killed 3 s after `nbackup -N` (the reinit waits for the replica); after the start an operator `nbackup -L` must still hold 150 s later |
-| 5c second-restart | lock released after a second restart | master killed under the lock; Firebird stopped, the node started (its unlock fails) and restarted again; once Firebird is back the `.delta` must go |
+| 5c second-restart | lock released after a second restart | master killed under the lock and kept down; `nbackup` renamed away (`fb-tool off`), the node started (its unlock fails) and restarted again; once `nbackup` is back the `.delta` must go. Firebird merely stopped is not enough: `nbackup -N` still worked |
 | 4b two-stale | a reinit to one stale replica keeps the other one NEEDS_REINIT | both replicas made stale (as item 4); a reinit to the first: the master stays `NEEDS_REINIT` for the second, which gets no segments; after a node restart too |
 | C5 generation | replica generation after a reinit of an IN_SYNC replica | the replica's generation in its API must be the master's new one |
 

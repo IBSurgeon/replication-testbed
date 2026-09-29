@@ -25,6 +25,8 @@
 #                             (kill-stay: killed, and systemd does not start it again)
 #   90-hostctl.sh nbackup-unlock --db FILE [--fb-root /opt/firebird] [--port 3050]
 #   90-hostctl.sh nbackup-lock   --db FILE [--fb-root /opt/firebird] [--port 3050]
+#   90-hostctl.sh fb-tool     --name nbackup --state off|on [--fb-root /opt/firebird]
+#                             (off: the tool renamed away, so every call fails)
 #                             (an operator's backup lock, nbackup -L)
 #   90-hostctl.sh db-new-guid --db FILE [--fb-root /opt/firebird] [--port 3050] [--fb-service UNIT]
 #   90-hostctl.sh rcm-api     --method GET --path /v1/alerts [--body-b64 B64] [--then-restart false]
@@ -305,6 +307,17 @@ PY
     result "{\"unlocked\":\"$DB\",\"delta_left\":$([[ -f "$DB.delta" ]] && echo true || echo false)}"
     ;;
 
+  fb-tool)
+    N="$(arg name)"; [[ -n "$N" ]] || die "--name is required"
+    T="$FB_ROOT/bin/$N"; [[ -e "$T" || -e "$T.tb-off" ]] || T="$FB_ROOT/$N"
+    case "$(arg state)" in
+      off) [[ -e "$T" ]] && mv -f "$T" "$T.tb-off" ;;
+      on)  [[ -e "$T.tb-off" ]] && mv -f "$T.tb-off" "$T" ;;
+      *) die "--state off|on" ;;
+    esac
+    result "{\"tool\":\"$T\",\"present\":$([[ -e "$T" ]] && echo true || echo false)}"
+    ;;
+
   nbackup-lock)
     load_secrets
     DB="$(arg db)"
@@ -367,5 +380,5 @@ print("TBRESULT " + json.dumps({"status": st, "body": b}))
 PY
     ;;
 
-  *) die "usage: 90-hostctl.sh secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|nbackup-lock|db-new-guid|rcm-api" ;;
+  *) die "usage: 90-hostctl.sh secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|nbackup-lock|fb-tool|db-new-guid|rcm-api" ;;
 esac
