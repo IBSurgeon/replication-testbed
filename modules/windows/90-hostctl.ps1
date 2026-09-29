@@ -15,8 +15,9 @@
 #   90-hostctl.ps1 statelog     --node-dir DIR --db-id ID [--from LINE]
 #   90-hostctl.ps1 replog-inject --path REPLICATION_LOG --db FILE --message-b64 B64 [--role replica] [--level ERROR] [--count 1]
 #   90-hostctl.ps1 peer-push    --node-dir DIR --addr HOST:PORT --meta-b64 B64 [--file F | --random N]
-#   90-hostctl.ps1 node-on-file --node-dir DIR --path FILE --event locked|unlocked --action stop|kill [--timeout 900]
+#   90-hostctl.ps1 node-on-file --node-dir DIR --path FILE --event locked|unlocked --action stop|kill [--timeout 900] [--delay SEC]
 #   90-hostctl.ps1 nbackup-unlock --db FILE [--fb-root DIR] [--port 3050]
+#   90-hostctl.ps1 nbackup-lock   --db FILE [--fb-root DIR] [--port 3050]
 #   90-hostctl.ps1 db-new-guid  --db FILE --fb-service NAME [--fb-root DIR] [--port 3050]
 #   90-hostctl.ps1 rcm-api      --method GET --path /v1/alerts [--body-b64 B64] [--then-restart false]
 #   (the same commands as 90-hostctl.sh; see there what each one is for)
@@ -245,6 +246,7 @@ order by 1;
       Start-Sleep -Milliseconds 20
     }
     if (-not $fired) { Die "no $evt event for $f" }
+    Start-Sleep -Seconds ([double](Arg $A "delay" "0"))
     $exe = Join-Path $NodeDir "hqclusternode.exe"
     switch (Arg $A "action" "stop") {
       "stop" { Invoke-Native $exe @("svc", "stop", "-config", (Join-Path $NodeDir "node.json")) | Out-Null }
@@ -259,6 +261,13 @@ order by 1;
     $db = Arg $A "db"
     Invoke-Native (Fb-Tool $FbRoot "nbackup") @("-N", "localhost/${Port}:$db") | Out-Null
     Result @{ unlocked = $db; delta_left = (Test-Path -LiteralPath "$db.delta") }
+  }
+
+  "nbackup-lock" {
+    Load-Secrets
+    $db = Arg $A "db"
+    Invoke-Native (Fb-Tool $FbRoot "nbackup") @("-L", "localhost/${Port}:$db") | Out-Null
+    Result @{ locked = $db; delta = (Test-Path -LiteralPath "$db.delta") }
   }
 
   "db-new-guid" {
@@ -313,5 +322,5 @@ order by 1;
     Result @{ status = $st; body = $b }
   }
 
-  default { Die "usage: 90-hostctl.ps1 secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|db-new-guid|rcm-api" }
+  default { Die "usage: 90-hostctl.ps1 secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|nbackup-lock|db-new-guid|rcm-api" }
 }

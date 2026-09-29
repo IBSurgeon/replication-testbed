@@ -21,8 +21,10 @@
 #   90-hostctl.sh peer-push   --node-dir DIR --addr HOST:PORT --meta-b64 B64 [--file F | --random N]
 #                             (POST /v1/peer/segments to another node, as this node)
 #   90-hostctl.sh node-on-file --node-dir DIR --path FILE --event locked|unlocked
-#                             --action stop|kill [--timeout 900]
+#                             --action stop|kill [--timeout 900] [--delay SEC]
 #   90-hostctl.sh nbackup-unlock --db FILE [--fb-root /opt/firebird] [--port 3050]
+#   90-hostctl.sh nbackup-lock   --db FILE [--fb-root /opt/firebird] [--port 3050]
+#                             (an operator's backup lock, nbackup -L)
 #   90-hostctl.sh db-new-guid --db FILE [--fb-root /opt/firebird] [--port 3050] [--fb-service UNIT]
 #   90-hostctl.sh rcm-api     --method GET --path /v1/alerts [--body-b64 B64] [--then-restart false]
 #                             (RCM operator API on this host, Digest login from the secrets)
@@ -281,6 +283,7 @@ while time.time() < end:
     time.sleep(0.02)
 sys.exit(3)
 PY
+    sleep "$(arg delay 0)"
     case "$(arg action stop)" in
       stop) "$NODE_DIR/hqclusternode" svc stop -config "$NODE_DIR/node.json" ;;
       kill) pkill -9 -f "$NODE_DIR/hqclusternode serve" || true ;;
@@ -294,6 +297,13 @@ PY
     DB="$(arg db)"
     "$(fb_tool "$FB_ROOT" nbackup)" -N "localhost/$PORT:$DB"
     result "{\"unlocked\":\"$DB\",\"delta_left\":$([[ -f "$DB.delta" ]] && echo true || echo false)}"
+    ;;
+
+  nbackup-lock)
+    load_secrets
+    DB="$(arg db)"
+    "$(fb_tool "$FB_ROOT" nbackup)" -L "localhost/$PORT:$DB"
+    result "{\"locked\":\"$DB\",\"delta\":$([[ -f "$DB.delta" ]] && echo true || echo false)}"
     ;;
 
   db-new-guid)
@@ -351,5 +361,5 @@ print("TBRESULT " + json.dumps({"status": st, "body": b}))
 PY
     ;;
 
-  *) die "usage: 90-hostctl.sh secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|db-new-guid|rcm-api" ;;
+  *) die "usage: 90-hostctl.sh secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|nbackup-lock|db-new-guid|rcm-api" ;;
 esac

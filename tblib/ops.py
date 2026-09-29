@@ -449,6 +449,12 @@ def reinit(cl, db_id, replica, mode="standard", timeout=3600, refusal_timeout=60
             log(f"reinit {db_id} -> {to}: refused (long transactions), retry in 30 s")
             time.sleep(30)
             continue
+        if st == 409 and code == "reinit_lock_recovery_pending" and time.time() < end_refusal:
+            # The node is still releasing the nbackup lock an interrupted
+            # reinit left (it retries every minute after a start).
+            log(f"reinit {db_id} -> {to}: the lock of an interrupted reinit is not released yet, retry in 20 s")
+            time.sleep(20)
+            continue
         raise TbError(f"reinit {db_id} -> {to}: HTTP {st} {json.dumps(resp)[:400]}")
     op = cl.wait_op(cl.cfg.master, resp["operation_id"], timeout=timeout)
     return op

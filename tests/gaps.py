@@ -17,10 +17,24 @@ answered.
                the replica's abandoned receive session and that next reinit
   7 rcm-jobs   RCM verify jobs and commands cut off by an RCM restart
   8 rcm-disabled  a DISABLED database is visible to the operator in RCM
+               (alert replication_disabled; no other alert counts)
+
+Found after the v2 merge (hqcluster-node docs/v2-gaps-fix-plan.md):
+
+  5b crash-unlocked  the master node killed after nbackup -N, while the
+               reinit waits for the replica: the next start must not run
+               nbackup -N again; an operator backup taken then keeps its lock
+  5c second-restart  the node restarted again before its unlock of an
+               interrupted reinit succeeded (Firebird down): the lock is
+               still released once Firebird is back
+  4b two-stale  two replicas refuse as stale_generation; a reinit to one
+               must leave the other NEEDS_REINIT and frozen (a restart too)
+  C5 generation  a reinit of an IN_SYNC replica: the replica generation
+               in its API is the new one
 
 The test uses its own database (--subdir, made when missing, removed at the
-end unless --keep). Items 3 and 4 need two replicas. Items 7 and 8 need the
-RCM login in the local config (secrets.rcm_user, secrets.rcm_password).
+end unless --keep). Items 3, 4 and 4b need two replicas. Items 7 and 8 need
+the RCM login in the local config (secrets.rcm_user, secrets.rcm_password).
 """
 import base64
 import json
@@ -37,7 +51,8 @@ from .states import conflict_push, fill_mailbox, settled, stale_setup
 
 HELP = "state machine section 12: is each possible gap a real problem"
 
-ITEMS = ["conflict", "disabled", "failed", "frozen", "crash", "rcm-jobs", "rcm-disabled"]
+ITEMS = ["conflict", "disabled", "failed", "frozen", "crash", "crash-unlocked", "second-restart",
+         "two-stale", "generation", "rcm-jobs", "rcm-disabled"]
 
 
 def add_args(p):
@@ -308,8 +323,11 @@ def g_rcm_disabled(sm):
         rcm(sm, "POST", "/v1/poll-now", {})
         _, alerts = rcm(sm, "GET", "/v1/alerts")
         alerts = alerts if isinstance(alerts, list) else (alerts or {}).get("alerts", []) if isinstance(alerts, dict) else []
+        # Only the alert about DISABLED counts: an older alert of the same
+        # database (sequence_conflict from item 1) passed this check before.
         found = [x for x in alerts if isinstance(x, dict) and x.get("database") == rid
-                 and x.get("node_id") in (rnode, None, "") and x.get("severity") in ("warn", "serious", "critical")]
+                 and x.get("node_id") in (rnode, None, "") and x.get("code") == "replication_disabled"
+                 and x.get("severity") in ("warn", "serious", "critical")]
         if found:
             break
         time.sleep(15)
@@ -320,13 +338,163 @@ def g_rcm_disabled(sm):
             break
     sm.res.record("12.8 DISABLED is visible in RCM", "PASS" if found else "FAIL",
                   note=(f"alert {found[0].get('code')} ({found[0].get('severity')}) in {int(time.time() - t0)}s"
-                        if found else f"confirmed: no warn/serious/critical alert for {rid} on {rnode} in RCM; "
+                        if found else f"confirmed: no replication_disabled alert for {rid} on {rnode} in RCM; "
                                       f"RCM shows {view}"),
                   simulated="replication.log ERROR ... disabled")
 
 
+def g_crash_unlocked(sm):
+    """5b: killed after nbackup -N (the reinit waits for the replica, its op
+    phase still says transfer). Before the fix, every start ran nbackup -N
+    by that phase, every minute for an hour: an operator backup taken in
+    that hour lost its lock."""
+    cl, rep = sm.cl, sm.rep
+    t = sm.node_on_file("unlocked", "kill", timeout=900, delay=3)
+    st, _ = sm.start_reinit(rep)
+    t.join(1000)
+    if not isinstance(t.result, dict):
+        setup_failed(sm, "5b", f"the node was not killed after the unlock (reinit HTTP {st})")
+        return
+    node_svc(cl, sm.m, "start")
+    if not wait_node(cl, sm.m, 180):
+        setup_failed(sm, "5b", "the node did not come back")
+        return
+    # The planned backup of the operator, right after the start.
+    cl.hostctl(sm.m, "nbackup-lock", {"db": sm.path}, check=False)
+    if not delta_left(cl, sm.path):
+        setup_failed(sm, "5b", "the operator nbackup -L left no .delta")
+        return
+    try:
+        time.sleep(150)      # two and a half tries of the old unlock loop
+        kept = bool(delta_left(cl, sm.path))
+    finally:
+        cl.hostctl(sm.m, "nbackup-unlock", {"db": sm.path}, check=False)
+    rec = sm.rec(sm.m) or {}
+    sm.res.record("12.5b operator backup keeps its lock after a crash past the unlock", "PASS" if kept else "FAIL",
+                  note=(f"the lock taken after the start was still there 150 s later; master {rec.get('state')}"
+                        if kept else "confirmed: the node released the operator nbackup lock after the start "
+                        f"(watcher {t.result})"))
+
+
+def g_second_restart(sm):
+    """5c: the node restarted a second time before its unlock of an
+    interrupted reinit succeeded (Firebird down). Before the fix the first
+    start cleared the op phase, the only witness, and the second start
+    forgot the lock."""
+    cl, rep = sm.cl, sm.rep
+    t = sm.node_on_file("locked", "kill", timeout=900)
+    st, _ = sm.start_reinit(rep)
+    t.join(1000)
+    if not isinstance(t.result, dict):
+        setup_failed(sm, "5c", f"the node was not killed under the lock (reinit HTTP {st})")
+        return
+    fb_svc(cl, sm.m, "stop")
+    try:
+        node_svc(cl, sm.m, "start")
+        wait_node(cl, sm.m, 180)
+        time.sleep(20)                  # the first try fails: no Firebird
+        first = bool(delta_left(cl, sm.path))
+        node_svc(cl, sm.m, "restart")
+        wait_node(cl, sm.m, 180)
+        time.sleep(10)
+    finally:
+        fb_svc(cl, sm.m, "start")
+    end = time.time() + 180             # the next try, a minute at most
+    lock = delta_left(cl, sm.path)
+    while lock and time.time() < end:
+        time.sleep(5)
+        lock = delta_left(cl, sm.path)
+    sm.res.record("12.5c lock released after a second restart", "PASS" if not lock else "FAIL",
+                  note=(f"no .delta within 180 s of the Firebird start (locked after the first start: {first})"
+                        if not lock else f"confirmed: {lock[0]} still there 180 s after the Firebird start"))
+    if lock:
+        cl.hostctl(sm.m, "nbackup-unlock", {"db": sm.path}, check=False)
+
+
+def reinit_causes(sm):
+    """Pair-scoped reinit causes of the master record: {peer_node_id: code}."""
+    rec = sm.rec(sm.m) or {}
+    return {c.get("peer"): c.get("code") for c in rec.get("causes") or []
+            if c.get("level") == "reinit" and c.get("scope") == "pair"}
+
+
+def g_two_stale(sm):
+    """4b: two replicas answer stale_generation; a reinit to one of them.
+    Before the fix the reinit cleared every pair cause and freeze: the
+    other replica showed IN_SYNC and got no segments until a restart."""
+    cl, rep, rep2 = sm.cl, sm.rep, other_rep(sm)
+    name = "12.4b a reinit to one stale replica keeps the other one NEEDS_REINIT"
+    if not rep2:
+        sm.res.record(name, SKIP, note="needs two replicas")
+        return
+    n1, n2 = cl.h(rep)["node_id"], cl.h(rep2)["node_id"]
+    notes = []
+    for r in (rep, rep2):
+        notes.append(stale_setup(sm, r))
+        if sm.state(sm.m).startswith("FAILED"):
+            cl.api(sm.m, "POST", "/v1/publication/sync", {}, check_status=False)
+    sm.load_on()
+    try:
+        end = time.time() + 300
+        causes = reinit_causes(sm)
+        while not (n1 in causes and n2 in causes) and time.time() < end:
+            time.sleep(10)
+            causes = reinit_causes(sm)
+    finally:
+        sm.load_off()
+    if not (n1 in causes and n2 in causes):
+        setup_failed(sm, "4b", f"not both replicas stale: causes {causes}; {'; '.join(notes)}")
+        return
+    op = sm.reinit(rep)
+    if op.get("state") != "succeeded":
+        setup_failed(sm, "4b", f"the reinit to {rep} did not succeed: {op.get('state')} {str(op.get('error'))[:150]}")
+        return
+    a0 = int(sm.ledger(rep2).get("last_acked") or 0)
+    sm.load(90)
+    time.sleep(15)
+    a1 = int(sm.ledger(rep2).get("last_acked") or 0)
+    s, causes = sm.state(sm.m), reinit_causes(sm)
+    ok = s.startswith("NEEDS_REINIT") and n2 in causes and n1 not in causes and a1 == a0
+    sm.res.record(name, "PASS" if ok else "FAIL",
+                  note=f"master {s}, reinit causes {causes}, {rep2} acked {a0}->{a1}")
+    node_svc(cl, sm.m, "restart")
+    wait_node(cl, sm.m, 180)
+    time.sleep(10)
+    s, causes = sm.state(sm.m), reinit_causes(sm)
+    ok = s.startswith("NEEDS_REINIT") and n2 in causes
+    sm.res.record("12.4b the other replica stays NEEDS_REINIT after a restart", "PASS" if ok else "FAIL",
+                  note=f"master {s}, reinit causes {causes}")
+
+
+def g_generation(sm):
+    """C5: a reinit of an IN_SYNC replica. The generation reached the
+    journal only with a change of the view: a replica that stayed IN_SYNC
+    kept the old one for the 410 guard and the stats."""
+    cl, rep = sm.cl, sm.rep
+    if sm.wait(rep, "IN_SYNC", 300, db_id=sm.rid(rep)) != "IN_SYNC":
+        setup_failed(sm, "C5", f"replica is {sm.state(rep, sm.rid(rep))}, not IN_SYNC")
+        return
+    g0 = int((sm.rec(rep, sm.rid(rep)) or {}).get("generation") or 0)
+    op = sm.reinit(rep)
+    if op.get("state") != "succeeded":
+        setup_failed(sm, "C5", f"reinit {op.get('state')} {str(op.get('error'))[:150]}")
+        return
+    mg = int((sm.rec(sm.m) or {}).get("generation") or 0)
+    end = time.time() + 120
+    g1 = g0
+    while time.time() < end:
+        g1 = int((sm.rec(rep, sm.rid(rep)) or {}).get("generation") or 0)
+        if g1 == mg:
+            break
+        time.sleep(5)
+    sm.res.record("C5 replica generation after a reinit of an IN_SYNC replica", "PASS" if g1 == mg else "FAIL",
+                  note=f"replica generation {g0}->{g1}, master {mg}")
+
+
 RUN = {"conflict": g_conflict, "disabled": g_disabled, "failed": g_failed, "frozen": g_frozen,
-       "crash": g_crash, "rcm-jobs": g_rcm_jobs, "rcm-disabled": g_rcm_disabled}
+       "crash": g_crash, "crash-unlocked": g_crash_unlocked, "second-restart": g_second_restart,
+       "two-stale": g_two_stale, "generation": g_generation,
+       "rcm-jobs": g_rcm_jobs, "rcm-disabled": g_rcm_disabled}
 
 
 def run(cl, a):
@@ -352,7 +520,7 @@ def run(cl, a):
             res.record(f"{n}: run", "FAIL", note=str(e)[:300])
         finally:
             sm.load_off()
-            fb_start_all(cl, reps)
+            fb_start_all(cl, [cl.cfg.master] + reps)
         if not settled(sm):
             sm.recover(n)
     if made and not a.keep:

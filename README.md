@@ -51,6 +51,7 @@ python tb.py test disasters
 python tb.py test datacheck
 python tb.py test states                     # every state and transition of one database
 python tb.py test gaps                       # section 12 gaps of the state machine: real or not
+python tb.py test upgrade --old-dist DIR     # 2027.1.x -> this build over its state (run before dbs prepare)
 python tb.py dbs remove
 python tb.py uninstall --source local        # fails with a list if anything is left
 python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on the hosts
@@ -71,6 +72,7 @@ python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on th
 | 9 | test | `test datacheck` | the node's periodic data check (N-09): history on every node, no mismatch under load, a match once quiet |
 | 10 | test | `test states` | every state and transition (T1-T36) of one database, read from the node's state journal |
 | 11 | test | `test gaps` | the eight possible gaps of the state machine (its section 12): real problem or not |
+| 12 | test | `test upgrade` | a 2027.1.x node upgraded to this build over its state: migration, an interrupted reinit's lock |
 | – | `90-hostctl` | used by tb.py and tests | node API calls, service control, row counts, limbo check, firewall block, replica control files, state journal, replication.log and peer segment injection |
 
 Details: [docs/modules.md](docs/modules.md). Tests: [docs/tests.md](docs/tests.md).

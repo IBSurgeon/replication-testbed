@@ -214,14 +214,15 @@ class SM:
         body = {"to": self.cl.h(rep)["node_id"], "mode": mode, "ignore_window": True, "allow_restart": True}
         return self.cl.api(self.m, "POST", f"/v1/databases/{self.db_id}/reinit", body, check_status=False)
 
-    def node_on_file(self, event, action, timeout=900):
+    def node_on_file(self, event, action, timeout=900, delay=0):
         """Stop or kill the master node when the database's nbackup lock file
-        appears (event "locked") or goes away again ("unlocked"). Runs in a
-        thread: start it, then start the reinit. Returns the thread; its
-        result is in thread.result."""
+        appears (event "locked") or goes away again ("unlocked"), `delay`
+        seconds later. Runs in a thread: start it, then start the reinit.
+        Returns the thread; its result is in thread.result."""
         t = threading.Thread(daemon=True, target=lambda: setattr(t, "result", self.cl.hostctl(
             self.m, "node-on-file", {"path": self.path + ".delta", "event": event, "action": action,
-                                     "timeout": timeout}, check=False, timeout=timeout + 120)))
+                                     "timeout": timeout, "delay": delay},
+            check=False, timeout=timeout + delay + 120)))
         t.result = None
         t.start()
         time.sleep(3)           # the watcher is running before the reinit starts
@@ -243,6 +244,13 @@ class SM:
             notes.append(f"{rep}: {op.get('state')}{' ' + str(op.get('error'))[:120] if not good else ''}")
         s = self.wait(self.m, "IN_SYNC", 300)
         ok = ok and s == "IN_SYNC"
+        # The replicas too: a cause the placed image did not clear (v2 C1)
+        # came back on the next tick as NEEDS_REINIT while the master was
+        # already IN_SYNC.
+        for rep in self.reps:
+            rs = self.wait(rep, "IN_SYNC", 300, db_id=self.rid(rep))
+            ok = ok and rs == "IN_SYNC"
+            notes.append(f"{rep} {rs}")
         self.res.record(f"recover after {why}" if why else "recover", "PASS" if ok else "FAIL",
                         note="; ".join(notes) + f"; master {s}")
         return ok

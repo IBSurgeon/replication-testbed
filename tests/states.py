@@ -41,6 +41,10 @@ Scenarios, in the order they run:
   stale         T31 T7 T26   the master stops right after the image is sent
   orphan        T34 T35 T4 T6  the file excluded by config, then back
   remove        T34 T36      the database removed and forgotten
+
+After all scenarios, one more case: the master journal has no hop
+IN_SYNC > CONFIGURED > IN_SYNC or FAILED > IN_SYNC > FAILED inside a
+scenario (a master tick without a full verdict used to cause both).
 """
 import time
 
@@ -502,6 +506,19 @@ RUN = {"create": sc_create, "pause": sc_pause, "replica-lag": sc_replica_lag, "b
        "stale": sc_stale, "orphan": sc_orphan, "remove": sc_remove}
 
 
+FLAPS = (("IN_SYNC", "CONFIGURED", "IN_SYNC"), ("FAILED", "IN_SYNC", "FAILED"))
+
+
+def flaps(chain):
+    """The FLAPS triples in a chain, as "A > B > C" strings."""
+    st = [c.split("/")[0] for c in chain]
+    out = []
+    for i in range(len(st) - 2):
+        if tuple(st[i:i + 3]) in FLAPS:
+            out.append(" > ".join(chain[i:i + 3]))
+    return out
+
+
 def run(cl, a):
     reps = pick_replicas(cl, a.replicas)
     names = SCENARIOS if a.only == "all" else [s.strip() for s in a.only.split(",")]
@@ -517,8 +534,10 @@ def run(cl, a):
         if not dbs:
             raise TbError(f"no test database in {a.subdir}: run with 'create' first")
         sm.use(dbs[0])
+    flapped = []
     for n in names:
         log(f"=== states: {n}")
+        tr = Trace(cl, sm.m, sm.db_id) if sm.db_id else None
         try:
             RUN[n](sm)
         except Exception as e:  # noqa: BLE001 - one scenario must not stop the others
@@ -530,6 +549,13 @@ def run(cl, a):
             fb_start_all(cl, reps)
         if sm.db_id and n != "remove" and not settled(sm):
             sm.recover(n)
+        if tr is not None:
+            found = flaps(tr.chain())
+            if found:
+                flapped.append(f"{n}: {'; '.join(found)}")
+    res.record("no IN_SYNC>CONFIGURED>IN_SYNC or FAILED>IN_SYNC>FAILED hops [master]",
+               "PASS" if not flapped else "FAIL",
+               note=("none in any scenario" if not flapped else " | ".join(flapped)))
     if sm.db_id:
         converge_and_record(cl, res, "converge", [sm.path], 900, reps)
     return res.finish()
