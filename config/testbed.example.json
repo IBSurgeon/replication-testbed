@@ -150,5 +150,17 @@
     "master_restart_window": "always",
     "replica_restart_window": "always",
     "transfer_window": "always"
+  },
+
+  "lab": {
+    "_readme": "tools/lab: private copies of HQbird 2.5/3.0 on this Windows machine, run as applications; the services they are copied from are never touched.",
+    "dir": "<lab directory; default state/lab>",
+    "hqbird30_root": "<HQbird 3.0 root to copy, e.g. C:\\HQbird\\Firebird30>",
+    "hqbird25_root": "<HQbird 2.5 root to copy, e.g. C:\\HQbird\\Firebird25>",
+    "port30": 3163,
+    "port25": 3162,
+    "password": "<SYSDBA password of the copies>",
+    "stock_password": "<SYSDBA password of a stock Firebird kit as shipped>",
+    "replconf_repo": "<local clone of IBSurgeon/replconf, for test/gen_samples.py>"
   }
 }
