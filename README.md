@@ -51,7 +51,7 @@ python tb.py test disasters
 python tb.py test datacheck
 python tb.py test states                     # every state and transition of one database
 python tb.py test gaps                       # section 12 gaps of the state machine: real or not
-python tb.py test upgrade --old-dist DIR     # 2027.1.x -> this build over its state (run before dbs prepare)
+python tb.py test upgrade --old-dist DIR     # 2027.1.x -> this build over its state (fresh install or last)
 python tb.py dbs remove
 python tb.py uninstall --source local        # fails with a list if anything is left
 python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on the hosts

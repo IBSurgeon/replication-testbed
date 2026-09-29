@@ -15,7 +15,7 @@
 #   90-hostctl.ps1 statelog     --node-dir DIR --db-id ID [--from LINE]
 #   90-hostctl.ps1 replog-inject --path REPLICATION_LOG --db FILE --message-b64 B64 [--role replica] [--level ERROR] [--count 1]
 #   90-hostctl.ps1 peer-push    --node-dir DIR --addr HOST:PORT --meta-b64 B64 [--file F | --random N]
-#   90-hostctl.ps1 node-on-file --node-dir DIR --path FILE --event locked|unlocked --action stop|kill [--timeout 900] [--delay SEC]
+#   90-hostctl.ps1 node-on-file --node-dir DIR --path FILE --event locked|unlocked --action stop|kill|kill-stay [--timeout 900] [--delay SEC]
 #   90-hostctl.ps1 nbackup-unlock --db FILE [--fb-root DIR] [--port 3050]
 #   90-hostctl.ps1 nbackup-lock   --db FILE [--fb-root DIR] [--port 3050]
 #   90-hostctl.ps1 db-new-guid  --db FILE --fb-service NAME [--fb-root DIR] [--port 3050]
@@ -251,7 +251,12 @@ order by 1;
     switch (Arg $A "action" "stop") {
       "stop" { Invoke-Native $exe @("svc", "stop", "-config", (Join-Path $NodeDir "node.json")) | Out-Null }
       "kill" { Get-Process -Name "hqclusternode" -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force }
-      default { Die "--action stop|kill" }
+      "kill-stay" {
+        Get-Process -Name "hqclusternode" -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Stop-Process -Force
+        Start-Sleep -Seconds 1
+        Invoke-Native $exe @("svc", "stop", "-config", (Join-Path $NodeDir "node.json")) | Out-Null
+      }
+      default { Die "--action stop|kill|kill-stay" }
     }
     Result @{ fired = $evt; action = (Arg $A "action" "stop"); delta_exists = (Test-Path -LiteralPath $f) }
   }

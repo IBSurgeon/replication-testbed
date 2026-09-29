@@ -21,7 +21,8 @@
 #   90-hostctl.sh peer-push   --node-dir DIR --addr HOST:PORT --meta-b64 B64 [--file F | --random N]
 #                             (POST /v1/peer/segments to another node, as this node)
 #   90-hostctl.sh node-on-file --node-dir DIR --path FILE --event locked|unlocked
-#                             --action stop|kill [--timeout 900] [--delay SEC]
+#                             --action stop|kill|kill-stay [--timeout 900] [--delay SEC]
+#                             (kill-stay: killed, and systemd does not start it again)
 #   90-hostctl.sh nbackup-unlock --db FILE [--fb-root /opt/firebird] [--port 3050]
 #   90-hostctl.sh nbackup-lock   --db FILE [--fb-root /opt/firebird] [--port 3050]
 #                             (an operator's backup lock, nbackup -L)
@@ -287,7 +288,12 @@ PY
     case "$(arg action stop)" in
       stop) "$NODE_DIR/hqclusternode" svc stop -config "$NODE_DIR/node.json" ;;
       kill) pkill -9 -f "$NODE_DIR/hqclusternode serve" || true ;;
-      *) die "--action stop|kill" ;;
+      # A crash the node does not come back from by itself: systemd would
+      # start it again 5 s later (Restart=on-failure); svc stop cancels that.
+      kill-stay) pkill -9 -f "$NODE_DIR/hqclusternode serve" || true
+                 sleep 1
+                 "$NODE_DIR/hqclusternode" svc stop -config "$NODE_DIR/node.json" || true ;;
+      *) die "--action stop|kill|kill-stay" ;;
     esac
     result "{\"fired\":\"$(arg event locked)\",\"action\":\"$(arg action stop)\",\"delta_exists\":$([[ -f "$F" ]] && echo true || echo false)}"
     ;;

@@ -382,7 +382,9 @@ def g_second_restart(sm):
     start cleared the op phase, the only witness, and the second start
     forgot the lock."""
     cl, rep = sm.cl, sm.rep
-    t = sm.node_on_file("locked", "kill", timeout=900)
+    # kill-stay: systemd must not start the node again before Firebird is
+    # down, or its first try would succeed.
+    t = sm.node_on_file("locked", "kill-stay", timeout=900)
     st, _ = sm.start_reinit(rep)
     t.join(1000)
     if not isinstance(t.result, dict):

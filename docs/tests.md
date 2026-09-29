@@ -173,16 +173,19 @@ python tb.py test gaps --only conflict,disabled --settle 600
 
 ## upgrade
 
-A 2027.1.x node upgraded to this build over its own state (schema 1), with
-an interrupted reinit and a `NEEDS_REINIT` replica. Run it right after
-`install`, before `dbs prepare`: it removes the node and its state on every
-host, installs the old node from `--old-dist`, makes a test database with
-it, kills the master under a reinit's nbackup lock and makes a replica
-`NEEDS_REINIT` (3 simulated key violations), then installs this build over
-it. Cases: the node opens the old state (schema 2001); the lock is released;
-the master leaves `SEEDING`; the replica stays
-`NEEDS_REINIT/upgrade_needs_reinit` after a minute of load; a reinit brings
-everything to `IN_SYNC`.
+A 2027.1.x node upgraded to this build over its own state (schema 1). Run
+it on a fresh install or last: it removes the node and its state on every
+host. It installs the old node from `--old-dist` and makes two test
+databases with it; on the old version db2 becomes `NEEDS_ATTENTION` on the
+master (simulated "Replication is stopped"), a replica of db1 `NEEDS_REINIT`
+(3 simulated key violations), and the master is killed under a reinit's
+nbackup lock of db1 and kept down (`node-on-file --action kill-stay`: systemd
+would start the old node again, and it would release the lock itself).
+Then this build is installed over it. Cases: the node opens the old state
+(schema 2001); this build releases the old node's lock; db1 leaves
+`SEEDING`; db2 stays `NEEDS_ATTENTION/replication_log_error` over a minute
+of reconcile ticks; the replica stays `NEEDS_REINIT/upgrade_needs_reinit`;
+a reinit brings db1 to `IN_SYNC`. No load: fb-loadgen is not needed.
 
 ```bash
 python tb.py test upgrade --old-dist state/dist-2027.1.15
