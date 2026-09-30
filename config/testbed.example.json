@@ -41,7 +41,8 @@
     "tag": "replication-testbed",
     "name_prefix": "tb",
     "firewall_name": "replication-testbed",
-    "operator_ip": "auto"
+    "operator_ip": "auto",
+    "operator_ports": []
   },
 
   "artifacts": {

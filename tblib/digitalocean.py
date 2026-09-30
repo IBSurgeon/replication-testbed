@@ -80,7 +80,11 @@ class DO:
     def firewall(self, droplet_ids):
         name = self.d.get("firewall_name", "replication-testbed")
         ports = sorted({str(self.cfg.host(h)["node_port"]) for h in self.cfg.node_hosts()} | {"7443"})
-        inbound = [{"protocol": "tcp", "ports": "22", "sources": {"addresses": [self.operator_ip() + "/32"]}}]
+        # operator_ports: more ports open to the operator IP only, e.g. an
+        # HTTPS proxy in front of the RCM web UI (which listens on loopback).
+        src = {"addresses": [self.operator_ip() + "/32"]}
+        inbound = [{"protocol": "tcp", "ports": p, "sources": src}
+                   for p in ["22"] + [str(x) for x in self.d.get("operator_ports", [])]]
         inbound += [{"protocol": "tcp", "ports": p, "sources": {"tags": [self.tag]}} for p in ports]
         outbound = [{"protocol": pr, "ports": "all" if pr != "icmp" else "0",
                      "destinations": {"addresses": ["0.0.0.0/0", "::/0"]}} for pr in ("tcp", "udp", "icmp")]
