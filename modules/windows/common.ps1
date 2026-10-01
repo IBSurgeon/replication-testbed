@@ -116,7 +116,10 @@ function Get-ProcessesUnder([string]$dir) {
   $q = [int]$PID
   while ($q -and -not $skip.ContainsKey($q)) {
     $skip[$q] = $true
-    $q = [int](Get-CimInstance Win32_Process -Filter "ProcessId=$q" -ErrorAction SilentlyContinue).ParentProcessId
+    # A parent that has exited is not found; under strict mode reading a
+    # property of $null throws, so stop the walk there.
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$q" -ErrorAction SilentlyContinue
+    $q = if ($p) { [int]$p.ParentProcessId } else { 0 }
   }
   return @(Get-CimInstance Win32_Process | Where-Object {
       -not $skip.ContainsKey([int]$_.ProcessId) -and (
@@ -125,11 +128,11 @@ function Get-ProcessesUnder([string]$dir) {
 }
 
 function Stop-ProcessesUnder([string]$dir) {
-  $ps = Get-ProcessesUnder $dir
+  $ps = @(Get-ProcessesUnder $dir)
   if ($ps.Count -eq 0) { return }
   Log ("stop processes in ${dir}: " + (($ps | ForEach-Object { "$($_.ProcessId) $($_.Name)" }) -join ", "))
   foreach ($p in $ps) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
-  Wait-Until 15 { (Get-ProcessesUnder $dir).Count -eq 0 } | Out-Null
+  Wait-Until 15 { @(Get-ProcessesUnder $dir).Count -eq 0 } | Out-Null
 }
 
 # One line for each thing of $dir still on the host: the folder, a service
