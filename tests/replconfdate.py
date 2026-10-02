@@ -17,8 +17,11 @@ Steps:
                       "Valid date" line
   auto_activate  С-2  (decision Р-С2 A) replconf.properties names a missing
                       file: a replica switches back by itself at its next
-                      start; the master with Firebird running only raises a
-                      critical alert. Firebird stopped, the node restarted
+                      start. The master inside its restart window (the
+                      default "always"; decision Р2, node 2027.4.3) is
+                      switched at once too. Outside a timed window: the
+                      master with Firebird running only raises a
+                      critical alert; Firebird stopped, the node restarted
                       (its unit starts Firebird again): HQbird 3.0 stops on
                       the broken file and the node, checking each minute,
                       switches it; HQbird 2.5 keeps running (fbguard starts
@@ -315,8 +318,20 @@ def step_auto_activate(cl, res, m, reps, dbs):
 
     doc = check(cl, m)
     break_properties(cl, m, doc)
+    # Decision Р2 (hqcluster-node 2027.4.3): a master also activates without
+    # a request inside its restart window. With the test bed's default
+    # window "always" the master is switched at once; only a timed window
+    # keeps it waiting outside the window, with a critical alert.
+    in_window = str(cl.cfg.windows.get("master_restart_window", "always")).strip().lower() in ("", "always")
     try:
         restart_node(cl, m)
+        if in_window:
+            d = wait_for(lambda: active_again(cl, m), 300, 10)
+            at = attach(cl, m, dbs[0]["path"])
+            res.record(f"[{m}] С-2 auto (Р2): the master in its restart window is switched, attach works",
+                       "PASS" if d and at.get("ok") else "FAIL",
+                       note=f"points to {(d or check(cl, m)).get('properties_target')}; attach {at}")
+            return
         time.sleep(20)
         d, a = check(cl, m), alert(cl, m, "replconf_properties_changed")
         # The text of the alert is the last check's: GET /v1/replconf says the

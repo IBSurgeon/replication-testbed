@@ -62,6 +62,25 @@ def alert_codes(cl, name):
     return {a.get("code") for a in items if isinstance(a, dict)}
 
 
+def alert_severity(cl, name, code):
+    """The severity of the node's alert code, None when it is not raised."""
+    st, doc = cl.api(name, "GET", "/v1/alerts", check_status=False)
+    items = doc if isinstance(doc, list) else (doc or {}).get("alerts", [])
+    return next((a.get("severity") for a in items if isinstance(a, dict) and a.get("code") == code), None)
+
+
+def wait_alert_info_at_most(cl, name, code, timeout=90):
+    """Wait until code is not raised above info."""
+    end = time.time() + timeout
+    while True:
+        replconf(cl, name)
+        if alert_severity(cl, name, code) in (None, "info"):
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(5)
+
+
 def wait_alert(cl, name, code, present=True, timeout=90):
     end = time.time() + timeout
     while True:
@@ -211,8 +230,14 @@ def run(cl, a):
             # Never leave a near or past date: HQbird then refuses every attach.
             cl.hostctl(m, "node-conf-set", {"key": "firebird.replconf_valid_till", "value_b64": b64(was or "2099-12-31")})
             restart_node(cl, m)
-        back = replconf(cl, m).get("valid_till")
-        cleared = wait_alert(cl, m, "replconf_expiring", False, timeout=90)
+        back_doc = replconf(cl, m)
+        back = back_doc.get("valid_till")
+        if back_doc.get("valid_till_source") == "default":
+            # The node's own default date (decision Р-С4, node 2027.4.3)
+            # keeps replconf_expiring as info until its last 7 days.
+            cleared = wait_alert_info_at_most(cl, m, "replconf_expiring", timeout=90)
+        else:
+            cleared = wait_alert(cl, m, "replconf_expiring", False, timeout=90)
         res.record("valid date back", "PASS" if back == (was or "2099-12-31") and cleared else "FAIL",
                    note=f"file valid till {back}")
 
