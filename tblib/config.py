@@ -103,6 +103,21 @@ class Config:
             out[section] = _merge(base[section], h.get(section, {}))
         role = "master" if name == self.master else "replica"
         out["role"] = role
+        # companion: a master-role node next to this replica node, on the same
+        # Firebird (RCM pairs them by host; "Promote to master" hands a
+        # replica's database to it). Its own folder <paths.node>/companion,
+        # port and certificate; databases.root stays empty until a promote.
+        comp = h.get("companion") or None
+        if comp:
+            if role != "replica":
+                raise ConfigError(f"hosts.{name}.companion: only a replica host can have a companion")
+            if os_name != "linux":
+                raise ConfigError(f"hosts.{name}.companion: Linux hosts only (module 10-local)")
+            comp = {"node_id": comp.get("node_id") or f"tb-{name}-m",
+                    "node_port": int(comp.get("node_port") or 7061)}
+            if comp["node_port"] == out["node_port"]:
+                raise ConfigError(f"hosts.{name}.companion.node_port must differ from node_port")
+        out["companion"] = comp
         sep = "/" if os_name == "linux" else "\\"
         if not out["paths"]["db_root"]:
             if os_name == "linux":
@@ -120,6 +135,10 @@ class Config:
 
     def node_hosts(self):
         return [self.master] + self.replicas
+
+    def companion_hosts(self):
+        """Replica hosts that also run a companion master node."""
+        return [n for n in self.replicas if n in self.hosts and self.hosts[n].get("companion")]
 
     def all_hosts(self):
         names = self.node_hosts()

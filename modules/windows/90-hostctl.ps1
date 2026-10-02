@@ -21,6 +21,8 @@
 #   90-hostctl.ps1 fb-tool        --name nbackup --state off|on [--fb-root DIR]
 #   90-hostctl.ps1 db-new-guid  --db FILE --fb-service NAME [--fb-root DIR] [--port 3050]
 #   90-hostctl.ps1 rcm-api      --method GET --path /v1/alerts [--body-b64 B64] [--then-restart false]
+#   90-hostctl.ps1 rcm-web      --path '/partials/db-table?tab=m3'
+#   90-hostctl.ps1 write-probe  --db FILE [--fb-root DIR] [--port 3050]
 #   (the same commands as 90-hostctl.sh; see there what each one is for)
 . (Join-Path $PSScriptRoot "common.ps1")
 $TbName = "90-hostctl"
@@ -340,5 +342,54 @@ order by 1;
     Result @{ status = $st; body = $b }
   }
 
-  default { Die "usage: 90-hostctl.ps1 secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|nbackup-lock|fb-tool|db-new-guid|rcm-api" }
+  "write-probe" {
+    # Does the database take writes? A replica refuses them.
+    Load-Secrets
+    $db = Arg $A "db"
+    if (-not (Test-Path -LiteralPath $db)) { Die "no database $db" }
+    $isql = Fb-Tool $FbRoot "isql"
+    if (-not $isql) { Die "no isql in $FbRoot" }
+    $sql = "set bail on;`r`nrecreate table TB_PROBE (ID integer not null primary key);`r`ncommit;`r`n" +
+           "insert into TB_PROBE (ID) values (" + (Get-Random -Maximum 32767) + ");`r`ncommit;`r`n"
+    $tmp = [IO.Path]::GetTempFileName()
+    [IO.File]::WriteAllText($tmp, $sql, (New-Object Text.UTF8Encoding($false)))
+    try { $r = Invoke-Native $isql @("-q", "-i", $tmp, "localhost/${Port}:$db") -Quiet }
+    finally { Remove-Item -LiteralPath $tmp -Force }
+    $err = [string]$r.Out
+    Result @{ written = ($r.Code -eq 0); error = $err.Substring([Math]::Max(0, $err.Length - 400)) }
+  }
+
+  "rcm-web" {
+    # The page parts (/partials/*) take only a web session: log in with the
+    # form, keep the cookie, ask as the page does (HX-Request: true).
+    if (Test-Path -LiteralPath $TbSecrets) {
+      foreach ($line in Get-Content -LiteralPath $TbSecrets) {
+        $eq = $line.IndexOf("=")
+        if ($eq -gt 0) { Set-Item -Path ("env:" + $line.Substring(0, $eq).Trim()) -Value $line.Substring($eq + 1) }
+      }
+    }
+    if (-not $env:TB_RCM_USER -or -not $env:TB_RCM_PASSWORD) { Die "TB_RCM_USER / TB_RCM_PASSWORD are not set (secrets rcm_user, rcm_password)" }
+    $jar = New-Object Net.CookieContainer
+    $login = [Net.HttpWebRequest]::Create("http://127.0.0.1:7444/login")
+    $login.Method = "POST"; $login.CookieContainer = $jar; $login.AllowAutoRedirect = $false
+    $login.ContentType = "application/x-www-form-urlencoded"
+    $form = "username=" + [Uri]::EscapeDataString($env:TB_RCM_USER) + "&password=" + [Uri]::EscapeDataString($env:TB_RCM_PASSWORD)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($form)
+    $s = $login.GetRequestStream(); $s.Write($bytes, 0, $bytes.Length); $s.Close()
+    try { $lr = $login.GetResponse() } catch [Net.WebException] { $lr = $_.Exception.Response; if (-not $lr) { Die $_.Exception.Message } }
+    $lr.Close()
+    if (-not ($jar.GetCookies([Uri]"http://127.0.0.1:7444/") | Where-Object { $_.Name -eq "rcm_session" })) { Die "RCM login failed" }
+    $req = [Net.HttpWebRequest]::Create("http://127.0.0.1:7444" + (Arg $A "path" "/partials/db-table?tab=m3"))
+    $req.CookieContainer = $jar; $req.Headers.Add("HX-Request", "true"); $req.Timeout = 60000
+    try { $resp = $req.GetResponse() } catch [Net.WebException] { $resp = $_.Exception.Response; if (-not $resp) { Die $_.Exception.Message } }
+    $st = [int]$resp.StatusCode
+    $ctype = [string]$resp.ContentType
+    $raw = (New-Object IO.StreamReader($resp.GetResponseStream(), [Text.Encoding]::UTF8)).ReadToEnd()
+    $resp.Close()
+    $b = $raw
+    if ($ctype -match "json" -and $raw) { try { $b = ConvertFrom-Json $raw } catch { $b = $raw } }
+    Result @{ status = $st; body = $b }
+  }
+
+  default { Die "usage: 90-hostctl.ps1 secure-file|node-api|node-svc|fb-svc|counts|limbo|files|remove-file|block-peer|unblock-peer|tail|replctl|statelog|replog-inject|peer-push|node-on-file|nbackup-unlock|nbackup-lock|fb-tool|db-new-guid|rcm-api|rcm-web|write-probe" }
 }

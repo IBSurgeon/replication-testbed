@@ -31,10 +31,10 @@
   },
 
   "digitalocean": {
-    "_readme": "Optional: 'tb.py do create' makes one droplet per host and writes ssh/addr into this file. destroy deletes only droplets with 'tag'.",
+    "_readme": "Optional: 'tb.py do create' makes one droplet per host and writes ssh/addr into this file. destroy deletes only droplets with 'tag'. Use 4 GB droplets (size s-2vcpu-4gb) for every stand.",
     "token_file": "<path to a file with the DigitalOcean API token>",
     "region": "<region, e.g. nyc3>",
-    "size": "s-4vcpu-8gb",
+    "size": "s-2vcpu-4gb",
     "image": "ubuntu-22-04-x64",
     "ssh_key_fingerprint": "<MD5 fingerprint of an ssh key registered in DigitalOcean>",
     "vpc_uuid": "",
@@ -121,6 +121,8 @@
       "node_id": "tb-replica1",
       "node_port": 7052,
       "_ports": "firebird.port / fbagent.port: 0 = from the host (RemoteServicePort in firebird.conf, else 3050; local_api.listen of an existing agent, else 13055).",
+      "_companion": "Optional (Linux, install --source local): a master-role node next to this replica on the same Firebird, for 'test promote'. Rename to 'companion' to use it. Default port 7061; it must differ from node_port.",
+      "_companion_example": { "node_id": "tb-replica1-m", "node_port": 7061 },
       "firebird": { "root": "", "port": 0, "service": "" },
       "fbagent": { "mode": "install", "dir": "", "port": 0, "instance_id": "", "service": "" },
       "paths": { "work": "", "node": "", "rcm": "", "db_root": "" }

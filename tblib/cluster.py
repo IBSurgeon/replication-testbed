@@ -235,7 +235,8 @@ class Cluster:
         out = C.state_path("certs", "ca.crt")
         m = self.cfg.master
         hst = self.host(m)
-        nodes = ",".join(f"{self.h(n)['node_id']}:{self.h(n)['role']}" for n in self.cfg.node_hosts())
+        nodes = ",".join([f"{self.h(n)['node_id']}:{self.h(n)['role']}" for n in self.cfg.node_hosts()] +
+                         [f"{self.h(n)['companion']['node_id']}:master" for n in self.cfg.companion_hosts()])
         sans = ["localhost", "127.0.0.1"] + sorted({self.h(n)["addr"] for n in self.cfg.all_hosts()})
         # Made for these nodes and addresses? New droplets get new addresses,
         # and certificates made for the old ones fail every dial that checks
@@ -298,6 +299,12 @@ class Cluster:
             mh = self.h(cfg.master)
             peers.append({"node_id": mh["node_id"], "url": f"https://{mh['addr']}:{mh['node_port']}",
                           "compress": "zstd"})
+            # A companion master on another host is a master of this replica
+            # too; the one on this host is not (it shares this Firebird).
+            for c in cfg.companion_hosts():
+                if c != name:
+                    peers.append({"node_id": self.h(c)["companion"]["node_id"],
+                                  "url": self.companion_url(c), "compress": "zstd"})
         if cfg.rcm_enabled:
             rcm = {"url": f"https://{self.h(cfg.rcm_host)['addr']}:7443",
                    "ca_cert": hst.join(h["paths"]["node"], "certs", "ca.crt")}
@@ -339,22 +346,79 @@ class Cluster:
             "peers": peers, "limits": limits, "exclude_filter": "",
         }
 
+    # --- companion (a master node next to a replica node, one Firebird) -----
+    def companion_dir(self, name):
+        return self.host(name).join(self.h(name)["paths"]["node"], "companion")
+
+    def companion_url(self, name):
+        h = self.h(name)
+        return f"https://{h['addr']}:{h['companion']['node_port']}"
+
+    def companion_json(self, name):
+        """node.json of the companion on replica host `name`: the replica's
+        Firebird and fbagent, role master, its own port and folder, no
+        databases until a promote enrolls one, and the other replicas as
+        peers (the replica on its own host shares its Firebird)."""
+        h, hst = self.h(name), self.host(name)
+        c = self.node_json(name)
+        c["node_id"] = h["companion"]["node_id"]
+        c["role"] = "master"
+        c["listen_addr"] = f":{h['companion']['node_port']}"
+        c["databases"] = {"root": "", "recursive": True, "template": "*.fdb"}
+        c["peers"] = [{"node_id": self.h(r)["node_id"],
+                       "url": f"https://{self.h(r)['addr']}:{self.h(r)['node_port']}", "compress": "zstd"}
+                      for r in self.cfg.replicas if r != name]
+        c["limits"] = {k: v for k, v in c["limits"].items() if k != "mailbox_pending_ceiling"}
+        c["windows"]["restart_window"] = self.cfg.windows["master_restart_window"]
+        if c["rcm"].get("ca_cert"):
+            c["rcm"]["ca_cert"] = hst.join(self.companion_dir(name), "certs", "ca.crt")
+        return c
+
+    def companion_api(self, name, method, path, body=None, timeout=60, check_status=True):
+        """The companion's node API on host `name`, with its own certificate."""
+        args = {"node_dir": self.companion_dir(name), "method": method, "path": path, "timeout": timeout}
+        if body is not None:
+            args["body_b64"] = b64(json.dumps(body))
+        self.ready(name)
+        argv = ["node-api"]
+        for k, v in args.items():
+            argv += ["--" + k.replace("_", "-"), str(v)]
+        rc, out, err = self.host(name).module("90-hostctl", argv, stream=False, timeout=timeout + 60)
+        res, _ = parse_output(out)
+        if not isinstance(res, dict) or "status" not in res:
+            raise TbError(f"[{name} companion] bad api answer for {method} {path}: {out[-500:]}")
+        st, bd = int(res["status"]), res.get("body")
+        if check_status and st >= 300:
+            raise TbError(f"[{name} companion] {method} {path} -> {st}: {json.dumps(bd)[:500]}")
+        return st, bd
+
     def rcm_json(self, name):
         hst = self.host(name)
         d = self.h(name)["paths"]["rcm"]
+        nodes = []
+        for n in self.cfg.node_hosts():
+            h = self.h(n)
+            e = {"node_id": h["node_id"], "role": h["role"], "url": f"https://{h['addr']}:{h['node_port']}"}
+            if h.get("companion"):
+                # One host label on the replica and its companion: RCM pairs
+                # them for "Promote to master".
+                e["host"] = n
+                nodes.append(e)
+                nodes.append({"node_id": h["companion"]["node_id"], "role": "master",
+                              "url": self.companion_url(n), "host": n})
+            else:
+                nodes.append(e)
         return {
             "ingest_addr": "0.0.0.0:7443", "operator_addr": "127.0.0.1:7444",
             "users_file": hst.join(d, "rcm-data", "users.json"),
             "tls": {"ca_cert": hst.join(d, "certs", "ca.crt"), "cert": hst.join(d, "certs", "rcm.crt"),
                     "key": hst.join(d, "certs", "rcm.key")},
-            "nodes": [{"node_id": self.h(n)["node_id"], "role": self.h(n)["role"],
-                       "url": f"https://{self.h(n)['addr']}:{self.h(n)['node_port']}"}
-                      for n in self.cfg.node_hosts()],
+            "nodes": nodes,
             "poll_interval_sec": 15, "stale_after_sec": 45,
             "data_dir": hst.join(d, "rcm-data"), "command_timeout_sec": 600,
         }
 
-    def upload_stage_conf(self, name, with_node, with_rcm):
+    def upload_stage_conf(self, name, with_node, with_rcm, with_companion=False):
         """Render configs + pick certs into state/gen/<host>/ and copy to <stage>."""
         certs = C.state_path("certs", "ca.crt")
         certs_dir = os.path.dirname(certs)
@@ -367,6 +431,12 @@ class Cluster:
             for f in ("ca.crt", f"{nid}.crt", f"{nid}.key"):
                 shutil.copy2(os.path.join(certs_dir, f), os.path.join(gen, "certs", f))
             _write_json(os.path.join(gen, "conf", "node.json"), self.node_json(name))
+        if with_companion:
+            os.makedirs(os.path.join(gen, "companion-certs"))
+            cid = self.h(name)["companion"]["node_id"]
+            for f in ("ca.crt", f"{cid}.crt", f"{cid}.key"):
+                shutil.copy2(os.path.join(certs_dir, f), os.path.join(gen, "companion-certs", f))
+            _write_json(os.path.join(gen, "conf", "companion.json"), self.companion_json(name))
         if with_rcm:
             os.makedirs(os.path.join(gen, "rcm-certs"))
             for f in ("ca.crt", "rcm.crt", "rcm.key"):
@@ -375,7 +445,7 @@ class Cluster:
         hst = self.host(name)
         stage = self.stage(name)
         hst.mkdir(stage)
-        for sub in ("conf", "certs", "rcm-certs"):
+        for sub in ("conf", "certs", "rcm-certs", "companion-certs"):
             p = os.path.join(gen, sub)
             if os.path.isdir(p):
                 hst.mkdir(hst.join(stage, sub))

@@ -43,6 +43,18 @@ CA key is kept only in `state/certs/` on the operator machine.
 | `wipe` | everything the test bed put on the host: load processes, `tb-block` firewall rules, rcm, node, an fbagent it installed (an `existing` agent stays); then the same check. `tb.py hosts wipe --hosts H --yes` also removes the work folder |
 | `fbagent-info` | `local_api` settings of an existing agent (the token on a `TBSECRET` line) |
 
+**Companion** (Linux replica hosts, `hosts.<replica>.companion {node_id,
+node_port}`): component `companion` installs a second node, role master, in
+`<paths.node>/companion` with its own port and certificate (`gencerts` gets
+its id), on the replica's Firebird and fbagent; its unit is
+`hqclusternode-master-p<fb port>`. Its `databases.root` is empty until a
+promote enrolls a database. Peers: the companion's are the other replicas;
+each other replica lists the companion as a master. `rcm.json` gives the
+replica and its companion one `host` label, which is how RCM pairs them for
+"Promote to master". Removing the node removes the companion too; the DO
+firewall opens its port between the droplets. `install --source goafts`
+skips it.
+
 ## 20-goafts — install from a goafts server
 
 `--url` is the bootstrap URL (`https://<host>:9443`). `--pin` is the SPKI
@@ -157,7 +169,9 @@ node's `POST /v1/peer/segments`, with this node's certificate), `node-on-file`
 (stop or kill the node when a `.delta` lock file appears or goes away),
 `nbackup-unlock`, `db-new-guid` (the master file replaced by an nbackup copy
 with a new GUID), `rcm-api` (RCM operator API on 127.0.0.1:7444, Digest login
-from the secrets). For `legacy` (Linux): `hold-tx` (a writing transaction
+from the secrets), `rcm-web --path P` (an RCM web page part such as
+`/partials/db-table?tab=m3`: form login, session cookie, `HX-Request: true`),
+`write-probe --db F` (one committed row in `TB_PROBE`; a replica refuses it), `db-header --db F` (`gstat -h`: Database GUID, Replication master GUID of HQbird 2.5/3.0, replication sequence, attributes), `db-copy-locked --db F --to F2 [--fixup seq|noseq|none] [--replica R]` (a copy as reinit makes one), `guid-promote --db F [--mode shutdown|stop] [--legacy true]` (a GUID of its own in place: replica mode off, single shutdown or Firebird stopped, `nbackup -L`, `-F` without `-SEQUENCE`, delta removed, validated, online), `segment-guids --glob 'P[;P]'` (GUID and number of journal segments), `replace-db --db F --with F2` (Firebird stopped, file replaced, started; Linux only), `attach --db F` (one attach through the server: HQbird 2.5/3.0 ask the replconf plugin on every attach), `clock --shift-days N` / `clock --epoch E` (the host clock N days on with time sync off; back to E with time sync on; Linux only). For `legacy` (Linux): `hold-tx` (a writing transaction
 left open N seconds, then rolled back), `node-conf-set` (one key of
 node.json), `file-put` / `file-restore` / `file-copy`. `node-api --addr HOST:PORT` calls another node's API with
 this node's certificate.

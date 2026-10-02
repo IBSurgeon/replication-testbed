@@ -279,18 +279,20 @@ fbagent_leftovers() {
 }
 
 # ----------------------------------------------------------- hqclusternode --
-node_install() { # STAGE NODE_DIR DB_ROOT SVC_USER
-  local stage="$1" dir="$2" dbroot="$3" user="${4:-root}"
+node_install() { # STAGE NODE_DIR DB_ROOT SVC_USER [CONF_NAME] [CERTS_SUBDIR]
+  # CONF_NAME / CERTS_SUBDIR: the companion's companion.json and
+  # companion-certs/ in the stage (default: node.json and certs/).
+  local stage="$1" dir="$2" dbroot="$3" user="${4:-root}" conf="${5:-node.json}" certs="${6:-certs}"
   [[ -f "$stage/bin/hqclusternode" ]] || die "missing $stage/bin/hqclusternode"
-  [[ -f "$stage/conf/node.json" ]] || die "missing $stage/conf/node.json"
+  [[ -f "$stage/conf/$conf" ]] || die "missing $stage/conf/$conf"
   log "hqclusternode -> $dir"
   mkdir -p "$dir/certs" "$dbroot"
   if [[ -f "$dir/node.json" ]]; then
     "$dir/hqclusternode" svc stop -config "$dir/node.json" 2>/dev/null || true
   fi
   install -m 0755 "$stage/bin/hqclusternode" "$dir/hqclusternode"
-  install -m 0640 "$stage/conf/node.json" "$dir/node.json"
-  cp -f "$stage/certs/"* "$dir/certs/"
+  install -m 0640 "$stage/conf/$conf" "$dir/node.json"
+  cp -f "$stage/$certs/"* "$dir/certs/"
   chown -R root:firebird "$dir"
   chmod 750 "$dir/certs"; chmod 640 "$dir/certs/"*
   chown -R firebird:firebird "$dbroot"

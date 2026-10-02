@@ -20,6 +20,8 @@ def components_of(cl, name, only=None):
     comps = []
     if name in cl.cfg.node_hosts():
         comps += ["fbagent", "node"]
+    if name in cl.cfg.companion_hosts():
+        comps.append("companion")     # after "node": it copies the replica's binary
     if cl.cfg.rcm_enabled and name == cl.cfg.rcm_host:
         comps.append("rcm")
     if only:
@@ -275,7 +277,10 @@ def install(cl, source, hosts="all", only=None, new_certs=False):
         comps = plan[n]
         if not comps:
             continue
-        cl.upload_stage_conf(n, "node" in comps, "rcm" in comps)
+        if source != "local" and "companion" in comps:
+            log(f"[{n}] companion: only 'install --source local' installs it; skipped")
+            comps = [c for c in comps if c != "companion"]
+        cl.upload_stage_conf(n, "node" in comps, "rcm" in comps, "companion" in comps)
         args = cl.base_args(n)
         if source == "local":
             args.update({"components": ",".join(comps), "stage": cl.stage(n)})

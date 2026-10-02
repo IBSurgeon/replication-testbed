@@ -3,7 +3,7 @@
 # enrollment; and remove what it installed.
 #
 #   10-local.sh detect
-#   10-local.sh install   --components fbagent,node,rcm --stage DIR
+#   10-local.sh install   --components fbagent,node,companion,rcm --stage DIR
 #                         [--fb-root /opt/firebird] [--fb-port 3050] [--fb-service UNIT]
 #                         [--fbagent-mode install|existing] [--fbagent-dir DIR]
 #                         [--fbagent-port 13050] [--fbagent-instance ID] [--fbagent-service hqbirdfbagent]
@@ -68,9 +68,15 @@ case "$CMD" in
       [[ -n "$DB_ROOT" ]] || die "--db-root is required for the node"
       node_install "$STAGE" "$NODE_DIR" "$DB_ROOT" "$(arg node_user root)"
     fi
+    if has "$COMPONENTS" companion; then
+      # A master-role node on this replica's Firebird, in its own folder
+      # (tb.py companion_json). Its unit is hqclusternode-master-p<port>.
+      node_install "$STAGE" "$NODE_DIR/companion" "$DB_ROOT" "$(arg node_user root)" \
+        companion.json companion-certs
+    fi
     if has "$COMPONENTS" rcm; then rcm_install "$STAGE" "$RCM_DIR"; fi
     # node.json / rcm.json hold the Firebird password: keep them only in place.
-    rm -rf "$STAGE/conf" "$STAGE/certs" "$STAGE/rcm-certs"
+    rm -rf "$STAGE/conf" "$STAGE/certs" "$STAGE/rcm-certs" "$STAGE/companion-certs"
     result '{"installed":true}'
     ;;
 
@@ -90,6 +96,11 @@ case "$CMD" in
       fi
     fi
     if has "$COMPONENTS" rcm; then rcm_uninstall "$RCM_DIR"; fi
+    # The companion lives in $NODE_DIR/companion: removing the node removes
+    # it too; alone it is removed on its own.
+    if has "$COMPONENTS" companion || [[ "$CMD" == wipe ]]; then
+      if [[ -d "$NODE_DIR/companion" ]]; then node_uninstall "$NODE_DIR/companion"; fi
+    fi
     if has "$COMPONENTS" node; then node_uninstall "$NODE_DIR"; fi
     if has "$COMPONENTS" fbagent && [[ "$FBA_MODE" == "install" ]]; then
       fbagent_uninstall "$FBA_DIR" "$FBA_SERVICE" "$FB_PORT"
@@ -98,6 +109,7 @@ case "$CMD" in
     {
       if has "$COMPONENTS" rcm; then leftovers_of rcm "$RCM_DIR"; unit_exists hqbirdrcm && echo "rcm: unit hqbirdrcm.service"; fi
       if has "$COMPONENTS" node; then leftovers_of node "$NODE_DIR"; fi
+      if has "$COMPONENTS" companion; then leftovers_of node "$NODE_DIR/companion"; fi
       if has "$COMPONENTS" fbagent && [[ "$FBA_MODE" == "install" ]]; then
         fbagent_leftovers "$FBA_DIR" "$FBA_SERVICE" "$FB_PORT"
       fi

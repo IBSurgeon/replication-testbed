@@ -43,6 +43,9 @@ python tb.py hosts wipe --hosts all --yes        # полная очистка �
 
 П.6 (реплики) — те же команды установки: `--hosts replicas` или `--hosts replica1`.
 
+Дроплеты DigitalOcean (`tb.py do create`): **только 4 ГБ** — `digitalocean.size` =
+`s-2vcpu-4gb` для каждого стенда.
+
 ## Режимы нагрузки
 
 | Параметр | Значения |
