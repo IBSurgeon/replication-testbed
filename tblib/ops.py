@@ -71,11 +71,16 @@ def adopt_existing_fbagent(cl, name):
     st["fbagent_token"] = tok
     if res and res.get("instance_id"):
         st["fbagent_instance"] = res["instance_id"]
-    # local_api.listen of the agent, else fbagent's own default (13055). A
-    # port set in the config must agree with it.
+    # local_api.listen of the agent, else what the agent binds without it:
+    # 10000 + the Firebird port (fbagent localapi.EffectiveListen; 13055 is
+    # only the library default for a port that would not fit). A port set in
+    # the config must agree with it.
     listen = str((res or {}).get("listen") or "")
-    port = int(listen.rsplit(":", 1)[1]) if ":" in listen and listen.rsplit(":", 1)[1].isdigit() \
-        else FBAGENT_PORT_DEFAULT
+    if ":" in listen and listen.rsplit(":", 1)[1].isdigit():
+        port = int(listen.rsplit(":", 1)[1])
+    else:
+        fbp = cl.fb_port(name) or 3050
+        port = 10000 + fbp if fbp <= 55535 else FBAGENT_PORT_DEFAULT
     set_port = int(cl.h(name)["fbagent"].get("port") or 0)
     if set_port and set_port != port:
         raise TbError(f"[{name}] hosts.{name}.fbagent.port is {set_port}, but the existing agent "

@@ -83,10 +83,16 @@ class Cluster:
             self.save()
         return st["fbagent_token"]
 
+    def fb_password(self, name):
+        """SYSDBA's password on this host: hosts.<name>.firebird.password (a
+        host whose Firebird has its own, e.g. a shared lab), else
+        secrets.firebird_password."""
+        return self.h(name)["firebird"].get("password") or self.cfg.secrets.get("firebird_password", "")
+
     def secrets_env(self, name):
         s = self.cfg.secrets
         return {"TB_FB_USER": s.get("firebird_user", "SYSDBA"),
-                "TB_FB_PASSWORD": s.get("firebird_password", ""),
+                "TB_FB_PASSWORD": self.fb_password(name),
                 "TB_FBAGENT_TOKEN": self.fbagent_token(name),
                 "TB_FB_INITIAL_PASSWORD": s.get("firebird_initial_password", ""),
                 # RCM operator login for the tests that use the RCM API; a
@@ -319,7 +325,7 @@ class Cluster:
         svc = self.fb_service(name)
         engine = self.fb_engine(name)
         fbj = {"root": root, "user": cfg.secrets.get("firebird_user", "SYSDBA"),
-               "password": cfg.secrets.get("firebird_password", ""), "port": self.fb_port(name),
+               "password": self.fb_password(name), "port": self.fb_port(name),
                "replication_conf": hst.join(root, "replication.conf"),
                "replication_log": hst.join(root, "replication.log"),
                "firebird_log": hst.join(root, "firebird.log"),

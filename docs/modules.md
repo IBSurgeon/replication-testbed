@@ -85,9 +85,17 @@ another bed's request.
 `firebird.port` and `fbagent.port` may be left out (or 0). Then `install`
 takes the Firebird port from `RemoteServicePort` in `firebird.conf` (3050 when
 it is not set) and, for an `existing` agent, the fbagent port from its
-`local_api.listen` (13055, fbagent's own default, when it is not set). A new
-agent gets 13055. A port set in the config must match what the host says, or
-`install` stops with both values.
+`local_api.listen`, or, when it is not set, what the agent binds then: 10000
++ the Firebird port (13050 for 3050; fbagent `localapi.EffectiveListen`). A
+new agent the test bed installs gets 13055. A port set in the config must
+match what the host says, or `install` stops with both values.
+
+## SYSDBA password of a host
+
+`secrets.firebird_password` is SYSDBA's password on every host. A host whose
+Firebird already has its own (a shared lab, an existing install) sets
+`hosts.<name>.firebird.password` in the local config instead; the node on
+that host and the modules use it. Never in a committed file.
 
 ## Engine of a host
 

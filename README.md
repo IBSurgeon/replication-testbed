@@ -61,6 +61,10 @@ python tb.py test guidprobe                  # GUIDs of the pairs, RCM pairing, 
 python tb.py test noseq                      # a replica recreated by hand without -SEQUENCE: the sign and who notices (4.0/5.0)
 python tb.py test replconfdate               # HQbird 2.5/3.0: the replconf valid date (default, auto-activation, fbagent date, expiry, old plugin); moves a replica's clock
 python tb.py test upgrade --old-dist DIR     # 2027.1.x -> this build over its state (fresh install or last)
+python tb.py test pubtables                  # node 2027.4.4: publication per table, on/off, syncs under load (4.0/5.0)
+python tb.py test replicakeep                # node 2027.4.4: a replica keeps its reinit copies with recursive=false
+python tb.py test reinitroot                 # node 2027.4.4: a missing databases root named and created (prepare)
+python tb.py test restartwait                # node 2027.4.4: the wait for the replica's restart; no extra restart
 python tb.py dbs remove
 python tb.py uninstall --source local        # fails with a list if anything is left
 python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on the hosts
@@ -89,6 +93,10 @@ python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on th
 | 17 | test | `test guidpromote` | promote, then a GUID of its own in place through the running Firebird (single shutdown, `nbackup -L`, `-F` without `-SEQUENCE`), under load: new GUID, no duplicate GUID in RCM, Initialize from the new master, guard |
 | 18 | test | `test guidprobe` | the GUIDs of each master/replica pair (HQbird 2.5/3.0: Replication master GUID), RCM pairing, and the in-place GUID change on a scratch replica copy |
 | 19 | test | `test noseq` | a replica recreated by hand without `-SEQUENCE` over a working replication: replica sequence 0 with control file `db_sequence` > 0, what Firebird does, whether the node notices |
+| 21 | test | `test pubtables` | node 2027.4.4: tables out of the publication and back, publication off and on (info alert), ten syncs and two real changes under load, verify with a table out (`not_published`) |
+| 22 | test | `test replicakeep` | node 2027.4.4: a replica with `recursive: false` keeps the copies reinit placed in `<root>/<master>/`, through a scan and a node restart, and still converges |
+| 23 | test | `test reinitroot` | node 2027.4.4: a missing databases root fails the permissions check with the fix, `POST /v1/databases/root/prepare` creates it 2770 with Firebird's group |
+| 24 | test | `test restartwait` | node 2027.4.4: a reinit to a replica whose restart window is closed shows the step `waiting`; the operator's restart ends the wait, and no second restart follows when the window opens |
 | 20 | test | `test replconfdate` | HQbird 2.5/3.0: the valid date of the node's replconf file. The node's 30-day default, activation and auto-activation of a broken engine, a date written as fbagent writes it, expiry with the clock moved, the plugin before 2.1.0 on a DataGuard file (V-12) |
 | – | `10-local` | `install --source local` (`hosts.<replica>.companion`) | a companion: a master-role node next to a replica node on the same Firebird, for `test promote` |
 | – | `06-instance` | `hosts prepare` (Windows, `firebird.copy_of`) | a second Firebird instance on a Windows host: a copy of a root with its own port and service |

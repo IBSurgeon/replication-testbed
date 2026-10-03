@@ -55,6 +55,10 @@
 #                             (one attach through the server: ok, or the error)
 #   90-hostctl.sh clock       --shift-days N | --epoch E
 #                             (N days from now with time sync off; E with time sync on)
+#   90-hostctl.sh sql         --db FILE --sql-b64 B64 [--fb-root /opt/firebird] [--port 3050]
+#                             (one isql script through the server: ok and the output)
+#   90-hostctl.sh stat        --path PATH   (owner, group, mode; exists false when missing)
+#   90-hostctl.sh remove-dir  --path DIR    (an empty folder only)
 #
 # Results come as one "TBRESULT <json>" line.
 source "$(dirname "$0")/common.sh"
@@ -684,6 +688,31 @@ PY
     load_secrets
     set +e; out="$(isql_q "$(arg db)" "set heading off; select 'TB_ATTACH_OK' from rdb\$database;" 2>&1)"; ec=$?; set -e
     python3 -c 'import json, sys; t = sys.argv[2]; print("TBRESULT " + json.dumps({"ok": sys.argv[1] == "0" and "TB_ATTACH_OK" in t, "out": "" if "TB_ATTACH_OK" in t else t[-300:]}))' "$ec" "$out"
+    ;;
+
+  sql)
+    # One isql script against a database through the server, for tests that
+    # write or read rows of their own. ok is isql's exit code.
+    load_secrets
+    DB="$(arg db)"; [[ -f "$DB" ]] || die "no database $DB"
+    SQL="$(base64 -d <<<"$(arg sql_b64)")" || die "bad --sql-b64"
+    set +e; out="$(isql_q "$DB" "$SQL" 2>&1)"; ec=$?; set -e
+    python3 -c 'import json,sys; print("TBRESULT " + json.dumps({"ok": sys.argv[1] == "0", "out": sys.argv[2][-4000:]}))' "$ec" "$out"
+    ;;
+
+  stat)
+    P="$(arg path)"
+    if [[ -e "$P" || -L "$P" ]]; then
+      result "$(stat -c '{"exists":true,"owner":"%U","group":"%G","mode":"%a","type":"%F"}' "$P")"
+    else
+      result '{"exists":false}'
+    fi
+    ;;
+
+  remove-dir)
+    P="$(arg path)"; [[ -n "$P" && "$P" != "/" ]] || die "bad --path"
+    if [[ -d "$P" ]]; then rmdir "$P" || die "cannot remove $P (not empty?)"; fi
+    result '{"removed":true}'
     ;;
 
   clock)

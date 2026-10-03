@@ -386,6 +386,60 @@ covered by its unit tests (`internal/clusterprov`).
 python tb.py test replconfdate [--steps default,activation] [--replica replica1]
 ```
 
+## pubtables
+
+hqcluster-node 2027.4.4, plan items N4 and N5 (Firebird 4/5; skipped on
+HQbird 2.5/3.0, which have no publications). On one test database, with two
+tables of the test's own (`TB_PUB_ON`, `TB_PUB_OFF`, dropped at the end):
+
+| Case | What |
+|---|---|
+| sync publishes the new tables | a sync after `CREATE TABLE` leaves no keyed table unpublished |
+| tables: keys and publication | `GET .../publication/tables`: every keyed table published, none without a key, `TB_PUB_ON` keyed by its primary key |
+| take a table out | `PUT .../publication/tables {"disabled": ["TB_PUB_OFF"]}`; a plain sync keeps it out; its rows do not reach the replicas, `TB_PUB_ON`'s do |
+| verify | with the table out, `POST .../verify` passes and marks it `not_published` |
+| put it back | rows written after that arrive |
+| syncs under load | ten plain syncs and two real changes (`TB_PUB_OFF` out and in) during load: the replicas match on every load table |
+| off and on | `PUT .../publication/state {"enabled": false}`: off by the operator, `master_publication_off` is `info`; on again |
+
+```bash
+python tb.py test pubtables [--db DB_ID] [--minutes 2]
+```
+
+## replicakeep
+
+hqcluster-node 2027.4.4, plan item N7. Per replica: `databases.recursive`
+set to false through `PUT /v1/config` (a scansync runs), so the scan no
+longer sees `<root>/<master>/`, where reinit put the copies. No copy goes
+`ORPHANED`, a dry-run scan orphans nothing, a node restart keeps them all,
+and the replicas still converge under load. `recursive` is set back at the
+end.
+
+## reinitroot
+
+hqcluster-node 2027.4.4, plan item N1. On one Linux replica, with a folder
+of the test's own under `/databases` (removed at the end; the replica's own
+root is left alone): `GET /v1/permissions?root=` fails
+`databases_root_exists` and names `POST /v1/databases/root/prepare` and the
+`install -d` command; prepare creates the folder 2770 with group firebird
+(the test bed's own install creates the replica's root, which is why a
+missing one never showed here); a second call leaves it; a relative path is
+400.
+
+## restartwait
+
+hqcluster-node 2027.4.4, plan item N2. A database of the test's own (subdir
+`tbrw`, removed at the end) and one replica whose restart window is closed
+(a one-minute window 12 hours away):
+
+| Case | What |
+|---|---|
+| the restarting step waits | the reinit job is done, its `restarting` step is `waiting` with a detail, `restart.state` queued or window |
+| the copy is PENDING_RESTART | the replica's record, conf axis |
+| the operator's restart ends the wait | `POST /v1/firebird/restart` on the replica: conf `ACTIVE`, alert `restart_required_after_reinit` gone |
+| no second restart | the window opens (`always`): no `reinit_restart` line in the node's log for 90 s |
+| the copy matches | after a short load |
+
 ## Not ported yet
 
 From `hqcluster-node/examples`, still to move here as test bed tests:
