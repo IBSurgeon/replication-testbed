@@ -10,6 +10,10 @@
 #   20-goafts.sh install   --components node,rcm [--product-install direct|agent]
 #                          [--channel stable] [--stage DIR] [--node-dir DIR] [--db-root DIR]
 #                          [--rcm-dir DIR] [--fbagent-dir DIR] [--fbagent-service NAME]
+#   20-goafts.sh installer --script FILE [--goafts chess1] [--channel stable] [fbagent args]
+#   20-goafts.sh cluster-prep [--bases /opt/hqclusternode,/opt/hqbirdrcm] [--db-root DIR]
+#   20-goafts.sh channel   [--product-channel CH] [--self-update on|off] [fbagent args]
+#   20-goafts.sh agent-swap --binary FILE | --restore true [fbagent args]
 #   20-goafts.sh uninstall --components fbagent,node,rcm [dirs as above]
 #   20-goafts.sh agent-id  [--fbagent-dir DIR]
 #
@@ -160,6 +164,145 @@ PY
     result '{"installed":true}'
     ;;
 
+  installer)
+    # The customer's way onto a bare host: fbagent's own installer
+    # (ops/linux-install/fbagent-fbXX_known.sh, --script) installs HQbird
+    # from its tarball (no replconf plugin, no replconf.properties), fbagent
+    # from goafts --goafts, enrolls it (waits for the CSR) and makes the
+    # cluster folders (--cluster). Then the test bed's local_api settings.
+    load_secrets
+    SCRIPT="$(arg script)"
+    [[ -f "$SCRIPT" ]] || die "--script $SCRIPT not found"
+    log "fbagent installer $(basename "$SCRIPT") --goafts $(arg goafts chess1) --channel $CHANNEL (waits for CSR approval)"
+    SYSDBA_PASS="$TB_FB_PASSWORD" bash "$SCRIPT" --goafts "$(arg goafts chess1)" --channel "$CHANNEL" \
+      --enroll --cluster --skip-apt-upgrade --enroll-timeout "$(arg enroll_timeout 30m)" </dev/null \
+      || die "the fbagent installer failed"
+    [[ -f "$FBA_DIR/agent_config.json" ]] || die "the installer left no $FBA_DIR/agent_config.json"
+    fbagent_patch_local_api "$FBA_DIR" "$FBA_PORT" "$FBA_INSTANCE"
+    chown firebird:firebird "$FBA_DIR/agent_config.json"
+    systemctl restart "$FBA_SERVICE"
+    wait_until 60 fbagent_check "$FBA_PORT" "$FBA_INSTANCE" "$FB_PORT" || die "fbagent local_api does not answer"
+    result "{\"agent_id\":\"$(json_get "$FBA_DIR/agent_config.json" goafts.agent_id)\"}"
+    ;;
+
+  cluster-prep)
+    # A goafts cluster: the agent (user firebird) writes each member's key,
+    # certificates and node.json / rcm.json into <base>/<role> and
+    # /opt/hqbirdrcm and installs the products there itself, but it cannot
+    # create folders in /opt. Make the base folders, as the fbagent
+    # installer's --cluster does, and the databases root.
+    id firebird >/dev/null 2>&1 || die "no 'firebird' user: install Firebird first"
+    IFS=',' read -r -a BASES <<<"$(arg bases /opt/hqclusternode,/opt/hqbirdrcm)"
+    for d in "${BASES[@]}"; do
+      [[ -d "$d" ]] || install -d -o firebird -g firebird -m 0750 "$d"
+      chown firebird:firebird "$d"
+    done
+    DB_ROOT="$(arg db_root)"
+    [[ -z "$DB_ROOT" ]] || install -d -o firebird -g firebird -m 2770 "$DB_ROOT"
+    # fbagent --setup writes SYSDBA with Firebird's stock password; the agent copies its
+    # credentials into the node.json it writes for a cluster member (only
+    # where node.json has none). Put this host's SYSDBA password in both, as
+    # the fbagent installer does with --sysdba-pass.
+    load_secrets
+    changed="$(CFG="$FBA_DIR/agent_config.json" NODE_JSON="$(arg node_dir)/node.json" python3 - <<'PY'
+import base64, json, os
+pw = os.environ.get("TB_FB_PASSWORD", "")
+out = []
+def save(path, doc):
+    st = os.stat(path)
+    tmp = path + ".tb-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2)
+    os.chmod(tmp, st.st_mode & 0o7777)
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.replace(tmp, path)
+cfg_path, node_path = os.environ["CFG"], os.environ["NODE_JSON"]
+if pw and os.path.isfile(cfg_path):
+    cfg = json.load(open(cfg_path, encoding="utf-8"))
+    cred = cfg.setdefault("firebird", {}).setdefault("credentials", {})
+    enc = base64.b64encode(pw.encode()).decode()
+    if str(cred.get("username") or "SYSDBA").upper() == "SYSDBA" and cred.get("password_encrypted") != enc:
+        cred.setdefault("username", "SYSDBA")
+        cred["password_encrypted"] = enc
+        save(cfg_path, cfg)
+        out.append("agent")
+if pw and os.path.isfile(node_path):
+    doc = json.load(open(node_path, encoding="utf-8"))
+    fb = doc.get("firebird") or {}
+    if str(fb.get("user") or "SYSDBA").upper() == "SYSDBA" and fb.get("password") != pw:
+        fb["password"] = pw
+        doc["firebird"] = fb
+        save(node_path, doc)
+        out.append("node")
+print(",".join(out))
+PY
+)"
+    if has "$changed" agent; then
+      systemctl restart "$FBA_SERVICE"
+      wait_until 60 fbagent_check "$FBA_PORT" "$FBA_INSTANCE" "$FB_PORT" || die "fbagent local_api does not answer"
+    fi
+    if has "$changed" node; then
+      "$(arg node_dir)/hqclusternode" svc stop -config "$(arg node_dir)/node.json" 2>/dev/null || true
+      "$(arg node_dir)/hqclusternode" svc start -config "$(arg node_dir)/node.json" 2>/dev/null || true
+    fi
+    log "SYSDBA password set in: ${changed:-nothing (already so)}"
+    result "{\"bases\":\"$(arg bases /opt/hqclusternode,/opt/hqbirdrcm)\",\"db_root\":\"$DB_ROOT\",\"password_set\":\"$changed\"}"
+    ;;
+
+  channel)
+    # --product-channel CH: the update channel of hqclusternode and hqbirdrcm
+    # in agent_config.json. --self-update on|off: whether the agent updates
+    # itself (goafts.auto_update.enabled). Then the agent is restarted.
+    load_secrets
+    CFG="$FBA_DIR/agent_config.json"
+    [[ -f "$CFG" ]] || die "no $CFG: enroll first"
+    PCH="$(arg product_channel)" SELF="$(arg self_update)" python3 - "$CFG" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+cfg = json.load(open(p, encoding="utf-8"))
+ch, self_up = os.environ["PCH"], os.environ["SELF"]
+if ch:
+    for prod in ("hqclusternode", "hqbirdrcm"):
+        cfg.setdefault(prod, {}).setdefault("update", {})["channel"] = ch
+if self_up in ("on", "off"):
+    cfg.setdefault("goafts", {}).setdefault("auto_update", {})["enabled"] = self_up == "on"
+json.dump(cfg, open(p, "w", encoding="utf-8"), indent=2)
+print("agent_config.json: product channel", ch or "(kept)", "; self-update", self_up or "(kept)")
+PY
+    chown firebird:firebird "$CFG"
+    systemctl restart "$FBA_SERVICE"
+    wait_until 60 fbagent_check "$FBA_PORT" "$FBA_INSTANCE" "$FB_PORT" || die "fbagent local_api does not answer"
+    result "{\"product_channel\":\"$(arg product_channel)\",\"self_update\":\"$(arg self_update)\"}"
+    ;;
+
+  agent-swap)
+    # --binary FILE: run this fbagent build in place of the installed one
+    # (an older agent, T4); the installed binary is kept as fbagent.tb-saved.
+    # --restore true: put the saved binary back. Turn self-update off first
+    # (channel --self-update off), or the agent replaces itself again.
+    load_secrets
+    SAVED="$FBA_DIR/fbagent.tb-saved"
+    systemctl stop "$FBA_SERVICE"
+    if [[ "$(arg restore false)" == true ]]; then
+      [[ -f "$SAVED" ]] || die "nothing to restore: no $SAVED"
+      mv -f "$SAVED" "$FBA_DIR/fbagent"
+    else
+      BIN="$(arg binary)"
+      [[ -f "$BIN" ]] || die "--binary $BIN not found"
+      [[ -f "$SAVED" ]] || cp -p "$FBA_DIR/fbagent" "$SAVED"
+      install -m 0755 "$BIN" "$FBA_DIR/fbagent"
+    fi
+    chown firebird:firebird "$FBA_DIR/fbagent"
+    since="$(date '+%Y-%m-%d %H:%M:%S')"
+    systemctl start "$FBA_SERVICE"
+    wait_until 60 fbagent_check "$FBA_PORT" "$FBA_INSTANCE" "$FB_PORT" || die "fbagent local_api does not answer"
+    # The version from the agent's start line ("fbagent --version" would start
+    # a second agent).
+    ver="$(journalctl -u "$FBA_SERVICE" --since "$since" --no-pager 2>/dev/null \
+           | grep -oE 'version[ =:"]+[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*')"
+    result "{\"version\":\"$ver\",\"restored\":$(arg restore false)}"
+    ;;
+
   uninstall)
     if has "$COMPONENTS" rcm; then rcm_uninstall "$RCM_DIR"; fi
     if has "$COMPONENTS" node; then node_uninstall "$NODE_DIR"; fi
@@ -179,5 +322,5 @@ PY
     result "{\"agent_id\":\"$(json_get "$FBA_DIR/agent_config.json" goafts.agent_id)\",\"hostname\":\"$(hostname -s)\"}"
     ;;
 
-  *) die "usage: 20-goafts.sh download|enroll|install|uninstall|agent-id [--key value ...]" ;;
+  *) die "usage: 20-goafts.sh download|enroll|install|installer|cluster-prep|channel|agent-swap|uninstall|agent-id [--key value ...]" ;;
 esac

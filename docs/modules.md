@@ -69,16 +69,26 @@ check the sha256 of the release metadata.
 | `install --product-install direct` | registers the node / RCM services from the downloaded binaries |
 | `install --product-install agent` | puts node.json/rcm.json and certs in place, sets `<product>.update.install_enabled`, runs `fbagent --product-update <id> --apply` (needs the products published on goafts) |
 | `uninstall` | as in 10-local, with the same check of what is left; `tb.py uninstall --deregister` also deletes the agent on goafts through the admin API |
+| `cluster-prep` | for a goafts cluster (`tb.py goafts up`): the base folders `/opt/hqclusternode` and `/opt/hqbirdrcm` owned by firebird (the agent cannot create them; the fbagent installer's `--cluster` does the same), the databases root (firebird, 2770), the host's SYSDBA password in `agent_config.json` and in a node.json the agent already wrote |
+| `channel --product-channel CH --self-update on\|off` | the update channel of hqclusternode and hqbirdrcm in `agent_config.json`, and the agent's own updates (`goafts.auto_update.enabled`); restarts the agent |
+| `agent-swap --binary FILE` / `--restore true` | runs another fbagent build in place of the installed one (the old agent of `replconfchain` T4); the installed binary waits as `fbagent.tb-saved` |
 
 CSR approval: with `goafts.admin` set in the local config (admin URL, client
-certificate, key, admin token) tb.py approves the CSRs of the test bed hosts
-itself. Without it, approve them in the goafts admin panel while tb.py waits.
-A pending CSR has no agent id yet, so tb.py approves a request only when all
-of these hold: the host name in it is exactly the host's name (no prefix
-match), it came from one of the host's addresses, it was made after this
+certificate, key, admin token - or `p5ctl`, below) tb.py approves the CSRs of
+the test bed hosts itself. Without it, approve them in the goafts admin panel
+while tb.py waits. A pending CSR has no agent id yet, so tb.py approves a
+request only when all of these hold: the host name in it is exactly the
+host's name, or the host's name and six digits (fbagent 2.5x names the
+request after its agent id, the host name and the enrollment date YYMMDD; no
+other prefix match), it came from one of the host's addresses, it was made after this
 enrollment began, and it is the only such request for that host. Anything
 else is logged and left for a person: on a shared goafts it never approves
 another bed's request.
+
+goafts admin through fbagent's p5ctl: `goafts.admin.p5ctl` (the path of a
+built `cmd/p5ctl-scratch`), `p5ctl_cwd` (the fbagent checkout whose
+`ops/secrets/instances.yaml` holds the admin credentials) and `instance`
+(e.g. `chess1`). The test bed config then holds nothing secret for goafts.
 
 ## Ports
 

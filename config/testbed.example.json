@@ -65,7 +65,16 @@
       "url": "",
       "client_cert": "",
       "client_key": "",
-      "token": ""
+      "token": "",
+      "_p5ctl": "Or, instead of url/cert/key/token: fbagent's p5ctl (cmd/p5ctl-scratch), run in the fbagent checkout whose ops/secrets/instances.yaml holds the admin credentials.",
+      "p5ctl": "",
+      "p5ctl_cwd": "",
+      "instance": "chess1"
+    },
+    "cluster": {
+      "_readme": "tb.py goafts up: a goafts cluster of the hosts (managed PKI). Each host's node_id is its member id; paths.node /opt/hqclusternode/<role>, paths.rcm /opt/hqbirdrcm. replconf_valid_till: HQbird 2.5/3.0 only.",
+      "cluster_id": "",
+      "replconf_valid_till": ""
     }
   },
 

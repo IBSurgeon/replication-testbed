@@ -123,15 +123,23 @@ def pin_b64(pin):
     return base64.b64encode(bytes.fromhex(pin)).decode()
 
 
-def admin_call(cl, method, path, body=None):
-    """goafts admin API through curl (mTLS client cert + X-Admin-Token + SPKI pin)."""
+def admin_call(cl, method, path, body=None, headers=None):
+    """goafts admin API: through curl (mTLS client cert + X-Admin-Token + SPKI
+    pin), or through fbagent's p5ctl (goafts.admin.p5ctl), which takes the
+    instance's admin credentials from its own folder - then the test bed
+    config holds nothing secret. Returns (HTTP status, body), None when no
+    admin API is configured."""
     g = cl.cfg.goafts
     a = g.get("admin", {})
+    if a.get("p5ctl"):
+        return p5ctl_call(a, method, path, body, headers)
     if not a.get("url"):
         return None
     cmd = ["curl", "-sS", "-k", "--pinnedpubkey", "sha256//" + pin_b64(g["pin"]),
            "--cert", a["client_cert"], "--key", a["client_key"], "-X", method,
            "-H", "Content-Type: application/json", "-w", "\n%{http_code}"]
+    for k, v in (headers or {}).items():
+        cmd += ["-H", f"{k}: {v}"]
     hdr = tempfile.NamedTemporaryFile("w", delete=False, suffix=".hdr")
     try:
         hdr.write(f"X-Admin-Token: {a['token']}\n")
@@ -148,6 +156,42 @@ def admin_call(cl, method, path, body=None):
         return int(code), (json.loads(text) if text.strip() else None)
     except ValueError:
         return int(code or 0), text
+
+
+def admin_configured(g):
+    """The goafts section names an admin API: curl (url) or p5ctl."""
+    a = g.get("admin", {})
+    return bool(a.get("url") or a.get("p5ctl"))
+
+
+def p5ctl_call(a, method, path, body=None, headers=None):
+    """fbagent's p5ctl-scratch: `p5ctl -i INSTANCE [-body FILE] [-h 'N: v'] METHOD PATH`,
+    run in the fbagent checkout (its ops/secrets/instances.yaml). It prints
+    "HTTP <code>" on stderr and the body on stdout."""
+    cmd = [a["p5ctl"], "-i", a.get("instance", "chess1")]
+    tmp = None
+    if body is not None:
+        tmp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8")
+        json.dump(body, tmp)
+        tmp.close()
+        cmd += ["-body", tmp.name]
+    for k, v in (headers or {}).items():
+        cmd += ["-h", f"{k}: {v}"]
+    cmd += [method, path]
+    env = dict(os.environ, MSYS_NO_PATHCONV="1")
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=a.get("p5ctl_cwd") or None,
+                           env=env, encoding="utf-8", errors="replace")
+    finally:
+        if tmp:
+            os.remove(tmp.name)
+    m = re.search(r"HTTP (\d{3})", p.stderr or "")
+    code = int(m.group(1)) if m else 0
+    text = (p.stdout or "").strip()
+    try:
+        return code, (json.loads(text) if text else None)
+    except ValueError:
+        return code, text or (p.stderr or "").strip()[-300:]
 
 
 def csr_expectations(cl, names, since):
@@ -190,6 +234,15 @@ def _csr_time(v):
 CSR_CLOCK_SLACK = 300      # seconds of clock difference between us and goafts
 
 
+def csr_host_matches(hn, hostnames):
+    """A CSR names the host, or (fbagent 2.5x) the agent id made of the
+    host name and the enrollment date, YYMMDD: tbga30-master261003."""
+    for h in hostnames:
+        if hn == h or (hn.startswith(h) and len(hn) == len(h) + 6 and hn[len(h):].isdigit()):
+            return True
+    return False
+
+
 def approve_pending(cl, expect, approved, warned):
     """Approve the one pending CSR of each host in `expect` that matches it
     exactly (host name, source address, made after enrollment began).
@@ -204,7 +257,7 @@ def approve_pending(cl, expect, approved, warned):
     for it in items or []:
         hn = str(it.get("hostname") or "").lower()
         for n, e in expect.items():
-            if n in approved or hn not in e["hostnames"]:
+            if n in approved or not csr_host_matches(hn, e["hostnames"]):
                 continue
             rid = it.get("request_id") or it.get("id")
             why = []
@@ -305,18 +358,31 @@ def install(cl, source, hosts="all", only=None, new_certs=False):
 
 def enroll_goafts(cl, names):
     g = cl.cfg.goafts
+
+    def enroll(n):
+        args = cl.base_args(n)
+        args.update({"url": g["url"], "pin": g["pin"], "enroll_timeout": g.get("enroll_timeout", "30m")})
+        return cl.module(n, "20-goafts", "enroll", args)[1]
+
+    enroll_with_approval(cl, names, enroll)
+
+
+def enroll_with_approval(cl, names, run):
+    """run(n) enrolls host n with goafts (and waits for its CSR), one thread
+    per host; meanwhile the CSRs of these hosts are approved through the
+    admin API when it is configured. run returns the module result, whose
+    agent_id is kept in the host state."""
+    g = cl.cfg.goafts
     errors = {}
 
-    def run(n):
+    def one(n):
         try:
-            args = cl.base_args(n)
-            args.update({"url": g["url"], "pin": g["pin"], "enroll_timeout": g.get("enroll_timeout", "30m")})
-            rc, res, _, _ = cl.module(n, "20-goafts", "enroll", args)
+            res = run(n)
             cl.hstate(n)["goafts_agent_id"] = (res or {}).get("agent_id", "")
         except Exception as e:  # noqa: BLE001 - reported below
             errors[n] = e
 
-    threads = [threading.Thread(target=run, args=(n,), daemon=True) for n in names]
+    threads = [threading.Thread(target=one, args=(n,), daemon=True) for n in names]
     for n in names:
         cl.ready(n)                     # before threads: ready() is not thread-safe
     expect = csr_expectations(cl, names, time.time())
@@ -324,13 +390,13 @@ def enroll_goafts(cl, names):
     for t in threads:
         t.start()
     hostnames = [cl.hstate(n).get("hostname", "") for n in names]
-    if g.get("admin", {}).get("url"):
+    if admin_configured(g):
         log("goafts: approving CSRs of the test bed hosts through the admin API")
     else:
         log("goafts: approve the CSR of each host in the goafts admin panel now "
             f"(hosts: {', '.join(h for h in hostnames if h)})")
     while any(t.is_alive() for t in threads):
-        if g.get("admin", {}).get("url"):
+        if admin_configured(g):
             try:
                 approve_pending(cl, expect, approved, warned)
             except Exception as e:  # noqa: BLE001

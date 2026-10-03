@@ -11,6 +11,10 @@ each host and runs them over ssh. See README.md.
   tb.py check
   tb.py install   --source local|goafts [--hosts all|master|replicas|h1,h2] [--components ...] [--new-certs]
   tb.py uninstall --source local|goafts [--hosts ...] [--components ...] [--deregister] [--keep-work]
+  tb.py goafts up                       (a goafts cluster: agents enroll, then install node and RCM)
+  tb.py goafts status|down [--yes]
+  tb.py goafts date --value YYYY-MM-DD|none
+  tb.py goafts channel [--product-channel CH] [--self-update on|off] [--hosts ...]
   tb.py dbs prepare [--count 2] [--subdir tb] [--no-seed]
   tb.py dbs remove  [--subdir tb]
   tb.py dbs list    [--subdir tb]
@@ -36,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from tblib import config as C          # noqa: E402
 from tblib import ops                  # noqa: E402
+from tblib import goafts as GA           # noqa: E402
 from tblib.cluster import Cluster, TbError, log   # noqa: E402
 from tblib.remote import RemoteError   # noqa: E402
 import tests                           # noqa: E402
@@ -141,6 +146,35 @@ def cmd_uninstall(cl, a):
     return 0
 
 
+def cmd_goafts(cl, a):
+    if a.action == "up":
+        GA.up(cl, timeout=a.timeout)
+    elif a.action == "down":
+        if not a.yes:
+            raise TbError("goafts down removes the cluster, the agents and the products: add --yes")
+        GA.down(cl)
+    elif a.action == "date":
+        if not a.value:
+            raise TbError("date: --value YYYY-MM-DD or none")
+        GA.set_date(cl, None if a.value == "none" else a.value)
+    elif a.action == "channel":
+        GA.set_channel(cl, cl.cfg.select(a.hosts), a.product_channel, a.self_update)
+    else:
+        doc = GA.get(cl)
+        if doc is None:
+            log(f"goafts: no cluster {GA.cluster_id(cl)}")
+            return 1
+        log(f"goafts: cluster {doc.get('cluster_id')} revision {doc.get('revision')} "
+            f"replconf_valid_till {doc.get('replconf_valid_till') or '-'}")
+        for m in doc.get("members") or []:
+            log(f"  {m.get('member_id'):24} {m.get('role'):8} agent {m.get('agent_id')}")
+        for n in cl.cfg.node_hosts():
+            log(f"  [{n}] node {'up' if GA.node_up(cl, n) else 'DOWN'}")
+        if cl.cfg.rcm_enabled:
+            log(f"  [{cl.cfg.rcm_host}] rcm {'up' if GA.rcm_up(cl) else 'DOWN'}")
+    return 0
+
+
 def cmd_dbs(cl, a):
     if a.action == "prepare":
         dbs = ops.dbs_prepare(cl, a.count, a.subdir, seed=not a.no_seed)
@@ -241,6 +275,15 @@ def main():
             s.add_argument("--deregister", action="store_true", help="goafts: delete the agents on the server")
             s.add_argument("--keep-work", action="store_true", help="keep <work> (modules, stage, load logs)")
 
+    s = sub.add_parser("goafts", help="a stand that goafts manages (cluster, agents, products)")
+    s.add_argument("action", choices=["up", "status", "date", "channel", "down"])
+    s.add_argument("--timeout", type=int, default=1200, help="up: wait for the nodes and the RCM")
+    s.add_argument("--value", help="date: YYYY-MM-DD, or none to drop replconf_valid_till")
+    s.add_argument("--product-channel", default="", help="channel: hqclusternode/hqbirdrcm update channel")
+    s.add_argument("--self-update", default="", choices=["", "on", "off"], help="channel: fbagent self-update")
+    s.add_argument("--hosts", default="all")
+    s.add_argument("--yes", action="store_true", help="down: really remove")
+
     s = sub.add_parser("dbs")
     s.add_argument("action", choices=["prepare", "remove", "list"])
     s.add_argument("--count", type=int)
@@ -299,7 +342,7 @@ def main():
     try:
         cl = Cluster(C.load(a.config))
         handler = {"do": cmd_do, "hosts": cmd_hosts, "check": cmd_check, "install": cmd_install, "uninstall": cmd_uninstall,
-                   "dbs": cmd_dbs, "loadgen": cmd_loadgen, "load": cmd_load, "verify": cmd_verify,
+                   "dbs": cmd_dbs, "goafts": cmd_goafts, "loadgen": cmd_loadgen, "load": cmd_load, "verify": cmd_verify,
                    "status": cmd_status}.get(a.cmd)
         if handler:
             return handler(cl, a)

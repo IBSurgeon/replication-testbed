@@ -483,3 +483,38 @@ replica node. Skipped on any other engine.
 ```bash
 python tb.py test tracegate [--replica replica1] [--seconds 60] [--repro]
 ```
+
+## replconfchain
+
+The replconf chain of HQbird 2.5/3.0 as a customer gets it: goafts ->
+fbagent -> node.json (hqcluster-node plans release-replconf-2027.4.3 Ш6 and
+next-steps Н8). It runs on a stand that goafts manages:
+
+```bash
+python tb.py do create && python tb.py hosts prepare   # hosts with HQbird only
+python tb.py goafts up        # agents enroll; goafts cluster; agents install node and RCM
+python tb.py loadgen deploy --from local
+python tb.py test replconfchain [--old-fbagent FILE] [--to-channel ops-test]
+python tb.py goafts down --yes
+```
+
+The local config needs `goafts` (bootstrap `url`, `pin`, `admin`, `channel`)
+and `goafts.cluster` (`cluster_id`, `replconf_valid_till`). Each host's
+`node_id` is its member id, `paths.node` the member's folder
+(`/opt/hqclusternode/master` or `.../replica`), `paths.rcm`
+`/opt/hqbirdrcm`.
+
+| Step | What |
+|---|---|
+| t1 install | node.json of each node came from the cluster (its node id, the cluster's `replconf_valid_till`). HQbird without a plugin (fbagent's installer, `goafts.installer_dir`): the node activated replconf itself through fbagent. HQbird's full installer (plugin and `replconf.properties` linked into `/opt/hqbird`): the node leaves that replconf alone, then the operator's `POST /v1/replconf/activate` goes through fbagent. Either way `active`, plugin version, `valid_till_source: config`; `plugins/`, `bin/`, the plugin and `replconf.properties` are root's and not writable by others; the RCM runs; one database replicates (`dbs prepare` when there is none, 30 s of load, rows match) |
+| t3 date | the cluster's date + 91 days reaches node.json of every node and the node's file, Firebird keeps its PID; the date dropped from the cluster: node.json keeps it; yesterday's date: not written, the agent's log says `has already passed`; the date put back |
+| t5 root | node stopped, its file removed, the Firebird root `root:root 0755`, node started: fbagent (2.59.0+) gives the root back to group firebird with `g+w` and the node writes its file, within `--root-minutes` (14) |
+| t4 old agent | `--old-fbagent FILE` (an fbagent before 2.57.0, without `replconf_install`), self-update off: with the plugin and `replconf.properties` moved away, the node refuses - `activate_error` `fbagent_outdated`, or, in a goafts cluster where the old agent writes `replication_conf = <root>/replication.conf` into node.json, `config_backend_mismatch` (the note says which); nothing is written in `plugins/` or `bin/` (name, owner, mode, size, link target of each entry); with the agent back the node activates again |
+| t2 update | `--to-channel CH`: the products' channel moved to CH on every host; the agents update node and RCM (the version of each node and the RCM binary change); replconf active again; rows match after a load |
+
+t3-t5 are skipped on Firebird 4/5. `--steps t1,t3` runs a subset; `--host`
+picks the host of t4/t5 (the first replica by default). An old fbagent for
+t4: build its tag, e.g. `git archive v2.56.0` and `CGO_ENABLED=0 GOOS=linux
+go build -trimpath -ldflags "-X fbagent/internal/buildinfo.Version=2.56.0"`.
+For t2 publish newer node/RCM builds in a channel the stand does not use
+(`cc2publish --channel ops-test`), and remove them after the run.
