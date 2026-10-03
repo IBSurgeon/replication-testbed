@@ -224,8 +224,12 @@ def step_default(cl, res, nodes):
         # A compacted journal may have lost the event; the store still knows
         # the default (source "default"), and the date is at most 30 days on.
         ahead = (datetime.date.fromisoformat(key) - host_today(cl, n)).days if key else -1
+        # A reinstall writes node.json anew, and the node then journals its
+        # default again: more than one event is fine while every one holds
+        # the same date (a changed date is the bug this catches).
+        same = all(((e.get("fields") or {}).get("value")) == key for e in ev)
         ok = (key and doc.get("valid_till_source") == "default" and info.get("valid_till") == key and 0 < ahead <= 30
-              and (not ev or (len(ev) == 1 and fields.get("value") == key and want == key)))
+              and (not ev or (same and want == key)))
         res.record(f"[{n}] С-1 default: first start + 30 days in node.json and in the node's file", "PASS" if ok else "FAIL",
                    note=f"node.json {key}; journal {len(ev)} event(s), at {at[:19]} value {fields.get('value')} (want {want or '?'}); "
                         f"source {doc.get('valid_till_source')}; file {info}")
