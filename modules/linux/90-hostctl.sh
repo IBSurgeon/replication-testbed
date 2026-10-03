@@ -25,6 +25,7 @@
 #                             (kill-stay: killed, and systemd does not start it again)
 #   90-hostctl.sh nbackup-unlock --db FILE [--fb-root /opt/firebird] [--port 3050]
 #   90-hostctl.sh nbackup-lock   --db FILE [--fb-root /opt/firebird] [--port 3050]
+#   90-hostctl.sh trace       --op list|start|stop|pid [--name N] (fbtracemgr user sessions, server PID)
 #   90-hostctl.sh fb-tool     --name nbackup --state off|on [--fb-root /opt/firebird]
 #                             (off: the tool renamed away, so every call fails)
 #                             (an operator's backup lock, nbackup -L)
@@ -713,6 +714,36 @@ PY
     P="$(arg path)"; [[ -n "$P" && "$P" != "/" ]] || die "bad --path"
     if [[ -d "$P" ]]; then rmdir "$P" || die "cannot remove $P (not empty?)"; fi
     result '{"removed":true}'
+    ;;
+
+  trace)
+    # User trace sessions of the server (fbtracemgr) and the server's PID:
+    # --op list | start --name N | stop --name N | pid. start runs fbtracemgr
+    # in the background with a minimal config (every database, statement
+    # finish); its output goes to /tmp/tb-trace-N.log.
+    load_secrets
+    TM="$(fb_tool "$FB_ROOT" fbtracemgr)"
+    SE="localhost/$PORT:service_mgr"
+    N="$(arg name)"
+    case "$(arg op)" in
+      list) ;;
+      start)
+        [[ "$N" =~ ^[A-Za-z0-9_-]+$ ]] || die "--name N (letters, digits, - _)"
+        printf 'database\n{\n\tenabled = true\n\tlog_statement_finish = true\n}\n' > "/tmp/tb-trace-$N.conf"
+        nohup "$TM" -se "$SE" -start -name "$N" -config "/tmp/tb-trace-$N.conf" > "/tmp/tb-trace-$N.log" 2>&1 &
+        sleep 3
+        ;;
+      stop)
+        id="$( { "$TM" -se "$SE" -list 2>/dev/null || true; } | awk -v n="$N" '/Session ID:/{id=$3} $1=="name:" && $2==n {print id}' | head -1)"
+        [[ -n "$id" ]] && "$TM" -se "$SE" -stop -id "$id" >/dev/null 2>&1 || true
+        ;;
+      pid) ;;
+      *) die "--op list|start|stop|pid" ;;
+    esac
+    # A server that is restarting answers nothing: no sessions, not a failure.
+    names="$( { "$TM" -se "$SE" -list 2>/dev/null || true; } | awk '$1=="name:" {print $2}' | paste -sd, -)"
+    pid="$(pgrep -o -x firebird || pgrep -o -x fb_smp_server || pgrep -o -x fbserver || true)"
+    python3 -c 'import json,sys; print("TBRESULT " + json.dumps({"sessions": [x for x in sys.argv[1].split(",") if x], "pid": int(sys.argv[2] or 0)}))' "$names" "${pid:-0}"
     ;;
 
   clock)

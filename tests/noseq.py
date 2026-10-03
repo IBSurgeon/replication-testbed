@@ -170,6 +170,19 @@ def run(cl, a):
                    "PASS" if same or flagged else "FAIL",
                    note=f"node state {st.get('state')} {st.get('state_reason') or ''}; RCM {rcm or '-'}; "
                         f"alerts on {rn}: {alerts}")
+        # Node 2027.4.5 (protocol minor 11) watches the sign itself:
+        # replica_sequence_zero and NEEDS_REINIT, without verbose_logging.
+        if ops.protocol_minor(cl, rep) >= 11:
+            end, zero = time.time() + 120, False
+            while not zero:
+                st = next((x for x in cl.databases(rep) if x.get("db_id") == rec.get("db_id")), {}) or {}
+                zero = bool(ops.node_alerts(cl, rep, "replica_sequence_zero", rec.get("db_id"))) and \
+                    st.get("state") == "NEEDS_REINIT"
+                if zero or time.time() > end:
+                    break
+                time.sleep(10)
+            res.record("node: replica_sequence_zero raised and the replica NEEDS_REINIT (node 2027.4.5)",
+                       "PASS" if zero else "FAIL", note=f"state {st.get('state')} {st.get('state_reason') or ''}")
     finally:
         cl.load_stop("noseq")
         for h, f in ((m, d["path"] + ".tbnoseq"), (rep, cl.replica_path(rep, d["path"]) + ".tbnoseq")):

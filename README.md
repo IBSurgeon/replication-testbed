@@ -65,6 +65,8 @@ python tb.py test pubtables                  # node 2027.4.4: publication per ta
 python tb.py test replicakeep                # node 2027.4.4: a replica keeps its reinit copies with recursive=false
 python tb.py test reinitroot                 # node 2027.4.4: a missing databases root named and created (prepare)
 python tb.py test restartwait                # node 2027.4.4: the wait for the replica's restart; no extra restart
+python tb.py test guidsigns                  # node 2027.4.5: master_guid of a replica; replica_control_missing
+python tb.py test tracegate [--repro]        # HQbird 3.0 replica: no fbagent trace session; --repro: the engine abort by hand
 python tb.py dbs remove
 python tb.py uninstall --source local        # fails with a list if anything is left
 python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on the hosts
@@ -96,6 +98,8 @@ python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on th
 | 21 | test | `test pubtables` | node 2027.4.4: tables out of the publication and back, publication off and on (info alert), ten syncs and two real changes under load, verify with a table out (`not_published`) |
 | 22 | test | `test replicakeep` | node 2027.4.4: a replica with `recursive: false` keeps the copies reinit placed in `<root>/<master>/`, through a scan and a node restart, and still converges |
 | 23 | test | `test reinitroot` | node 2027.4.4: a missing databases root fails the permissions check with the fix, `POST /v1/databases/root/prepare` creates it 2770 with Firebird's group |
+| 25 | test | `test guidsigns` | node 2027.4.5: `GET /guid` and the stats row of a replica name its master (`master_guid`, `master_guid_from`, `control_guid`, `source_node_id`/`source_db_id`); the control file removed from a working 4.0/5.0 replica raises `replica_control_missing` and NEEDS_REINIT (Firebird 5.0 then skips segments) |
+| 26 | test | `test tracegate` | HQbird 3.0 replica: fbagent 2.59+ runs no trace session there; the replica applies under load without an abort; `--repro`: a trace session started by hand aborts the server on the next segment (the engine bug, docs/engine-bugs) |
 | 24 | test | `test restartwait` | node 2027.4.4: a reinit to a replica whose restart window is closed shows the step `waiting`; the operator's restart ends the wait, and no second restart follows when the window opens |
 | 20 | test | `test replconfdate` | HQbird 2.5/3.0: the valid date of the node's replconf file. The node's 30-day default, activation and auto-activation of a broken engine, a date written as fbagent writes it, expiry with the clock moved, the plugin before 2.1.0 on a DataGuard file (V-12) |
 | – | `10-local` | `install --source local` (`hosts.<replica>.companion`) | a companion: a master-role node next to a replica node on the same Firebird, for `test promote` |

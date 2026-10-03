@@ -347,6 +347,7 @@ file `{master GUID}` in its journal source folder holds `db_sequence` > 0.
 | sign | replica sequence 0 while the control file holds `db_sequence` > 0; after the load it is still there (the control file's `sequence` moves on, `db_sequence` does not) |
 | firebird | rows on the replica after `--seconds` of load and the replication.log lines about it (noted, not failed) |
 | node | the node state or RCM flags the replica; FAIL when a replica that lost rows still looks healthy. Alerts are noted only: `db_file_replaced` says the file changed, not that segments are lost |
+| node 2027.4.5 | a node with protocol minor 11 raises `replica_sequence_zero` and the replica is `NEEDS_REINIT` |
 | restore | reinit and converge |
 
 By default the last test database that is still a replica on the host
@@ -449,3 +450,36 @@ From `hqcluster-node/examples`, still to move here as test bed tests:
   `live-windows-pair/30-disasters.ps1` (sequence conflict, mailbox ceiling
   and free-space floor are in `states`);
 - database file safety checks (`50-db-file-safety.ps1`, `dbfile-safety.py`).
+
+## guidsigns
+
+Node 2027.4.5 (protocol minor 11): the master as a replica knows it
+(hqcluster-node `docs/replica-own-guid-plan.md` v3). Skipped on an older node.
+
+| Check | What |
+|---|---|
+| setup | reinit of the first test database to the replica and a short load converge |
+| fields | `GET /v1/databases/{id}/guid` on the replica: `master_guid` = the master's GUID, `master_guid_from` `conf` (4.0/5.0) or `header` (2.5/3.0), `control_guid` = `master_guid` (4.0/5.0), `source_node_id` = the master node, `source_db_id` = the record's id; the stats row carries the same |
+| control | 4.0/5.0: the control file `{master GUID}` removed from the mailbox of a working replica under load raises `replica_control_missing` and the replica is `NEEDS_REINIT`. Firebird 5.0 resets the replication ("Database sequence has been changed from 0 to N") and deletes the next segments without applying them ("is scanned, deleting"): noted with the row comparison |
+| restore | reinit: the alert goes; converge |
+
+```bash
+python tb.py test guidsigns [--db db1] [--replica replica1] [--seconds 30]
+```
+
+## tracegate
+
+HQbird 3.0.15 aborts on the next segment apply after a user trace session
+appears on a replica (`docs/engine-bugs/hqbird30-replica-trace-abort.en.md`).
+fbagent 2.59.0 does not start its trace tasks on an HQbird 3.0 instance with a
+replica node. Skipped on any other engine.
+
+| Check | What |
+|---|---|
+| agent | no `FBAgent-*` trace session on the replica (`fbtracemgr -list`); the master's sessions are noted |
+| apply | under `--seconds` of load the replica converges, the server's PID stays, `firebird.log` gets no `terminated abnormally` |
+| repro | `--repro`: a trace session started by hand (`hostctl trace --op start`) aborts the server on the next applied segment (PID changes or the log line); the session is stopped and the replica converges |
+
+```bash
+python tb.py test tracegate [--replica replica1] [--seconds 60] [--repro]
+```

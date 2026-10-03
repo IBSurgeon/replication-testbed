@@ -1,11 +1,17 @@
 """Promote to master with a GUID of its own, under load, through the running
 Firebird service. RCM promotes a replica's database to the companion master
-on the same host (as test 'promote' does); then the database gets a new
-GUID in place, the way the planned promote step 'new_guid' will do it:
-replica mode off, single shutdown through the running server, nbackup -L,
-nbackup -F without -SEQUENCE, delta removed, validated, online. Needs a
-companion (hosts.<replica>.companion) and the RCM login.
+on the same host (as test 'promote' does). From hqbirdrcm/hqclusternode
+2027.4.5 the promote job itself gives the database a new GUID in place (step
+new_guid, POST /v1/databases/{id}/newguid on the donor: single shutdown,
+nbackup -L, nbackup -F without -SEQUENCE, delta removed, header checked,
+online): then 'auto' below is checked, and 'before' / 'new guid' are not.
+With an older RCM or node the test does the step by hand after the promote
+(hostctl guid-promote), as before. Needs a companion
+(hosts.<replica>.companion) and the RCM login.
 
+  auto        (2027.4.5) the job's step new_guid ran: the promoted database
+              has a GUID of its own, no lock, not a replica, and RCM never
+              shows a duplicate GUID for it
   before      the promoted database still has the old master's GUID (reinit
               copies it with -SEQUENCE) and RCM raises duplicate_guid
   new guid    every step through the running service; a new GUID,
@@ -163,6 +169,51 @@ def run(cl, a):
             return res.finish()
         cid = cdb["db_id"]
 
+        def dup_raised():
+            # Per database: the group of the new master is a duplicate-GUID
+            # group (the alert itself is one per set of master nodes).
+            g = group_of(cl, cn, cid)
+            return bool(g and g.get("duplicate_guid"))
+
+        # --- auto: the promote job's own step new_guid (2027.4.5) -------------------
+        step = next((s for s in job.get("steps") or [] if s.get("id") == "new_guid"), None)
+        h_auto = cl.hostctl(donor, "db-header", {"db": dpath, "port": port}) or {}
+        auto = bool(step and step.get("state") == "done" and h_auto.get("guid")
+                    and h_auto.get("guid") != old.get("guid"))
+        if step:
+            attrs = (h_auto.get("attributes") or "").lower()
+            ok = auto and "replica" not in attrs and "backup" not in attrs and "shutdown" not in attrs
+            res.record("auto: the promote step new_guid gave the database a GUID of its own", "PASS" if ok else "FAIL",
+                       note=f"step {step.get('state')} {step.get('detail') or ''}; master {old.get('guid')}; "
+                            f"promoted {h_auto.get('guid')} sequence {h_auto.get('repl_seq')} '{h_auto.get('attributes')}'")
+            if not auto:
+                return res.finish()
+            dup, end = False, time.time() + 90
+            while not dup and time.time() < end:
+                R.poll_now(cl)
+                time.sleep(15)
+                dup = dup_raised()
+            res.record("auto: RCM shows no duplicate GUID for the new master", "FAIL" if dup else "PASS",
+                       note="the group is a duplicate-GUID group" if dup else "no duplicate")
+            new_guid = h_auto.get("guid")
+        else:
+            log("guidpromote: the promote job has no step new_guid (RCM or node before 2027.4.5): the step by hand")
+            new_guid = manual_new_guid(cl, res, a, m, old, donor, dpath, port, legacy, dup_raised)
+            if not new_guid:
+                return res.finish()
+        guidpromote_rest(cl, res, a, m, mid, d, dn, donor, cn, cid, dpath, port, others, new_guid, dup_raised)
+    finally:
+        cl.load_stop("guidpromote")
+        cl.module(donor, "50-load", "stop", {"tag": "guidpromote-new"}, check=False)
+    finish_guidpromote(cl, res, d, donor, cn, others)
+    return res.finish()
+
+
+def manual_new_guid(cl, res, a, m, old, donor, dpath, port, legacy, dup_raised):
+    """The new GUID by hand (RCM or node before 2027.4.5): the GUID before,
+    the duplicate GUID RCM raises, then hostctl guid-promote. Returns the new
+    GUID, or "" when a step failed."""
+    if True:
         # --- before ----------------------------------------------------------
         h0 = cl.hostctl(donor, "db-header", {"db": dpath, "port": port}) or {}
         same = h0.get("guid") and h0.get("guid") == old.get("guid")
@@ -170,11 +221,6 @@ def run(cl, a):
                    note=f"master {old.get('guid')} sequence {old.get('repl_seq')}; promoted {h0.get('guid')} "
                         f"sequence {h0.get('repl_seq')} ({h0.get('attributes')})")
 
-        def dup_raised():
-            # Per database: the group of the new master is a duplicate-GUID
-            # group (the alert itself is one per set of master nodes).
-            g = group_of(cl, cn, cid)
-            return bool(g and g.get("duplicate_guid"))
         end = time.time() + 180
         dup = dup_raised()
         while not dup and time.time() < end:
@@ -214,20 +260,26 @@ def run(cl, a):
             res.record("new guid: Firebird was not restarted", "PASS" if same_pid else "FAIL",
                        note=f"pid {r.get('pid_before')} -> {r.get('pid_after')}")
         if not r.get("ok"):
-            return res.finish()
-        new_guid = h1.get("guid")
+            return ""
+        return h1.get("guid")
 
+
+def guidpromote_rest(cl, res, a, m, mid, d, dn, donor, cn, cid, dpath, port, others, new_guid, dup_raised):
+    """journal, rcm, initialize and guard, after the new GUID."""
+    if True:
         # --- journal of the new master -------------------------------------------
         w = cl.hostctl(donor, "write-probe", {"db": dpath, "port": port}, check=False) or {}
-        segs = []
+        # new_guid comes from gstat: on 2.5/3.0 in another word order than
+        # the segment headers.
+        forms, segs = ops.guid_forms(new_guid), []
         end = time.time() + 120
         while time.time() < end:
             segs = cl.hostctl(donor, "segment-guids", {"glob": f"{dpath}.ReplLog/*;{dpath}.LogArch/*"}, check=False) or []
-            if any(s.get("guid") == new_guid for s in segs):
+            if any((s.get("guid") or "").upper() in forms for s in segs):
                 break
             time.sleep(10)
-        mine = sorted(s["sequence"] for s in segs if s.get("guid") == new_guid)
-        foreign = sorted({s.get("guid") for s in segs if s.get("guid") != new_guid})
+        mine = sorted(s["sequence"] for s in segs if (s.get("guid") or "").upper() in forms)
+        foreign = sorted({s.get("guid") for s in segs if (s.get("guid") or "").upper() not in forms})
         res.record("journal: the new master writes segments with the new GUID", "PASS" if w.get("written") and mine else "FAIL",
                    note=f"write {w.get('written')}; segments of the new GUID {mine[:5]}{'…' if len(mine) > 5 else ''}; "
                         f"other GUIDs left in the journal folders {foreign}")
@@ -278,10 +330,10 @@ def run(cl, a):
         ok = refused and h2.get("guid") == new_guid and w2.get("written")
         res.record("guard: Initialize from the old master onto the promoted file is refused", "PASS" if ok else "FAIL",
                    note=f"HTTP {st}: {str(why)[:300]}; GUID kept {h2.get('guid') == new_guid}; writable {w2.get('written')}")
-    finally:
-        cl.load_stop("guidpromote")
-        cl.module(donor, "50-load", "stop", {"tag": "guidpromote-new"}, check=False)
 
+
+def finish_guidpromote(cl, res, d, donor, cn, others):
+    """Observations and converge, every load stopped."""
     # --- observations: what the companion node saw ------------------------------------
     seen = sorted({x.get("code") for x in R.alerts(cl) if x.get("node_id") == cn and x.get("code") in
                    ("master_db_replaced", "old_journal_quarantined", "db_file_replaced", "shipping_paused")})
@@ -297,4 +349,3 @@ def run(cl, a):
     if rest:
         converge_and_record(cl, res, f"converge: the other databases on {donor} (same Firebird)", rest, 900,
                             replicas=[donor])
-    return res.finish()

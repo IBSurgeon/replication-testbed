@@ -485,6 +485,39 @@ def legacy(cl, name):
     return cl.fb_engine(name) in LEGACY_ENGINES
 
 
+def guid_forms(guid):
+    """Both text forms of a GUID, upper case: as given, and with the word
+    order gstat of HQbird 2.5/3.0 prints (the first group's two halves
+    swapped, the bytes of each 16-bit word of the last two groups swapped).
+    The swap is its own inverse."""
+    g = (guid or "").upper().strip("{}")
+    p = g.split("-")
+    if len(p) != 5 or len(p[0]) != 8:
+        return {g} if g else set()
+
+    def sw(x):
+        return "".join(x[i + 2:i + 4] + x[i:i + 2] for i in range(0, len(x), 4))
+    return {g, "-".join([p[0][4:] + p[0][:4], p[1], p[2], sw(p[3]), sw(p[4])])}
+
+
+def protocol_minor(cl, name):
+    """The node's protocol minor (GET /v1/version), 0 when unknown."""
+    st, body = cl.api(name, "GET", "/v1/version", check_status=False)
+    try:
+        return int((body or {}).get("protocol_minor") or 0) if st == 200 else 0
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+def node_alerts(cl, name, code=None, db_id=None):
+    """The node's alerts (GET /v1/alerts), filtered by code and database."""
+    _, body = cl.api(name, "GET", "/v1/alerts", check_status=False)
+    items = body if isinstance(body, list) else (body or {}).get("alerts", []) if isinstance(body, dict) else []
+    return [x for x in items if isinstance(x, dict)
+            and (code is None or x.get("code") == code)
+            and (db_id is None or x.get("database") in (db_id, "", None))]
+
+
 def activate_replconf(cl, name):
     """HQbird 2.5/3.0: switch the engine to the node's replconf file (the
     node's plugin, replconf.properties, one Firebird restart through
