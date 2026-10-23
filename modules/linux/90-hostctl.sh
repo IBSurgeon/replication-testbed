@@ -542,7 +542,9 @@ jar = http.cookiejar.CookieJar()
 op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 form = urllib.parse.urlencode({"username": user, "password": pw}).encode()
 try:
-    r = op.open(urllib.request.Request(base + "/login", data=form, method="POST"), timeout=30)
+    # RCM 2027.4.9 (review G-01) refuses a login with no same-origin evidence.
+    r = op.open(urllib.request.Request(base + "/login", data=form, method="POST",
+                                       headers={"Origin": base, "Sec-Fetch-Site": "same-origin"}), timeout=30)
     landed = r.geturl()
 except urllib.error.HTTPError as e:
     landed = e.geturl() or ""

@@ -373,6 +373,8 @@ order by 1;
     $login = [Net.HttpWebRequest]::Create("http://127.0.0.1:7444/login")
     $login.Method = "POST"; $login.CookieContainer = $jar; $login.AllowAutoRedirect = $false
     $login.ContentType = "application/x-www-form-urlencoded"
+    # RCM 2027.4.9 (review G-01) refuses a login with no same-origin evidence.
+    $login.Headers.Add("Origin", "http://127.0.0.1:7444"); $login.Headers.Add("Sec-Fetch-Site", "same-origin")
     $form = "username=" + [Uri]::EscapeDataString($env:TB_RCM_USER) + "&password=" + [Uri]::EscapeDataString($env:TB_RCM_PASSWORD)
     $bytes = [Text.Encoding]::UTF8.GetBytes($form)
     $s = $login.GetRequestStream(); $s.Write($bytes, 0, $bytes.Length); $s.Close()

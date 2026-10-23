@@ -193,3 +193,29 @@ from the secrets), `rcm-web --path P` (an RCM web page part such as
 left open N seconds, then rolled back), `node-conf-set` (one key of
 node.json), `file-put` / `file-restore` / `file-copy`. `node-api --addr HOST:PORT` calls another node's API with
 this node's certificate.
+
+## 91-journal, 92-ident, 93-stage1 — review 2026-10-22 scenarios
+
+Host actions of the thirteen review tests (`docs/tests.md`, "Review
+2026-10-22 scenarios"). Same command names and arguments on Linux and Windows;
+the Windows modules are best-effort ports.
+
+- `91-journal` (node journal, crashes, replication.log): `journal-info`,
+  `journal-events`, `journal-append` (refused while the node runs),
+  `snapshot-block`, `kill-when --on witness|file|now` (the node killed when a
+  journal line or a file appears), `path-info`, `file-partial`, `file-move`,
+  `remove-path` (only `tb-` paths or `*.hqc-move-tmp`), `replog-state`,
+  `replog-rotate --mode drain|truncate|rename|copytruncate`, `replog-cleanup`,
+  `inject-while` (lines written while a watched file exists).
+- `92-ident` (node identity and RCM): `rcm-http` (one RCM request with a
+  chosen auth, headers and body; the login headers can be same-origin, none
+  or cross-site), `rcm-digest-fail` (Digest attempts with a wrong password),
+  `rcm-svc stop|start|restart|status`, `rcm-block on|off --port P` (RCM's
+  uid cannot reach a node port; iptables / Windows Firewall), `rcm-ghost
+  add|remove|list` (a Ghost tombstone in RCM's state.json, RCM stopped and
+  started), `rcm-reinits` (the last reinit jobs from state.json).
+- `93-stage1`: `sql-utf8` (one isql script with `-ch UTF8`), `count-tables`
+  (quoted names), `journal` (raw journal events with filters),
+  `age-files --glob --days` (file times moved back), `fblog-inject --path
+  --count` (error entries appended to firebird.log in Firebird's format;
+  never truncates).

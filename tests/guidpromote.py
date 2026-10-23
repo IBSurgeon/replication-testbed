@@ -297,7 +297,7 @@ def guidpromote_rest(cl, res, a, m, mid, d, dn, donor, cn, cid, dpath, port, oth
         nkey = f"m:{cn}|{cid}"
         ok, page = R.wait_table(cl, "m3", lambda pg: nkey in R.blocks(pg), what="the new master's block")
         newb = {k: v for k, v in R.blocks(page).items() if k == nkey}
-        claimed = [(x.get("node"), x.get("status")) for v in newb.values() for x in R.replica_rows(v)]
+        claimed = [(x.get("node"), x.get("status"), x.get("name"), (x.get("attrs") or {}).get("data-state")) for v in newb.values() for x in R.replica_rows(v)]
         res.record("rcm: the new master's block holds no replica of the old master", "PASS" if newb and not claimed else "FAIL",
                    note=f"blocks {list(newb)}; replica rows {claimed}")
 

@@ -106,6 +106,7 @@ python tb.py hosts wipe --hosts all --yes    # remove all the test bed put on th
 | 20 | test | `test replconfdate` | HQbird 2.5/3.0: the valid date of the node's replconf file. The node's 30-day default, activation and auto-activation of a broken engine, a date written as fbagent writes it, expiry with the clock moved, the plugin before 2.1.0 on a DataGuard file (V-12) |
 | – | `10-local` | `install --source local` (`hosts.<replica>.companion`) | a companion: a master-role node next to a replica node on the same Firebird, for `test promote` |
 | – | `06-instance` | `hosts prepare` (Windows, `firebird.copy_of`) | a second Firebird instance on a Windows host: a copy of a root with its own port and service |
+| – | `91-journal`, `92-ident`, `93-stage1` | the review 2026-10-22 tests (`docs/tests.md`, "Review 2026-10-22 scenarios") | node journal, crash and replication.log actions; RCM requests, service, ghost rows and port blocks; UTF8 SQL, journal filters, file ages, firebird.log flood |
 | – | `90-hostctl` | used by tb.py and tests | node API calls, service control, row counts, limbo check, firewall block, replica control files, state journal, replication.log and peer segment injection |
 
 Details: [docs/modules.md](docs/modules.md). Tests: [docs/tests.md](docs/tests.md).

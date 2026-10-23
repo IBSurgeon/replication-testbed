@@ -518,3 +518,44 @@ t4: build its tag, e.g. `git archive v2.56.0` and `CGO_ENABLED=0 GOOS=linux
 go build -trimpath -ldflags "-X fbagent/internal/buildinfo.Version=2.56.0"`.
 For t2 publish newer node/RCM builds in a channel the stand does not use
 (`cc2publish --channel ops-test`), and remove them after the run.
+
+## Review 2026-10-22 scenarios
+
+Thirteen tests check the fixes of the hqcluster-node / hqbirdrcm code review of
+2026-10-22 (the finding ids are from `docs/review-2026-10-22/` in the node
+repository). Each one is a plain `tb.py test <name>`; the host actions they
+need live in the modules `91-journal`, `92-ident` and `93-stage1`
+(`docs/modules.md`). `promote_mixed_platform` (a Linux RCM with a Windows
+node) is not here: it needs a Windows pair.
+
+| Test | Findings | What it proves |
+|---|---|---|
+| `restart_replay` | B-01, B-02, B-03, B-11 | replica node restarts under load (clean stop/start, kill -9, a stop with state.json unwritable) and one master restart: no state, conf or generation change, no NEEDS_REINIT; last_segment, last_received and the control-file sequence never go back; the ledger is monotonic; a clean stop rotates the journal to `.bak` (at most `journal_backups_keep`), a blocked stop keeps it; no request replay entry older than 24 h |
+| `move_crash` | C-01 | a replica move killed at the journal witness or when the new file appears, and crafted crash states (backward: a partial `.hqc-move-tmp`; forward: the rename done, the mailbox left behind; opt-in conflict): the file exists once, no temp file is left, the record follows the file and is not ORPHANED, Firebird runs, the file attaches, no `db_file_missing` (except in the conflict case), a second move works |
+| `logrotate_tail` | D-01 | replication.log rotated under the tail (the node's drain and copy-then-truncate, logrotate's rename and copytruncate) and drained while the node is stopped: injected probe and error blocks are read exactly once (`stats.received`, `apply_error` once with n=5), nothing is read again after a rotation or a restart; about 10 minutes |
+| `reinit_stale_line` | D-02 | errors before a reinit, then constraint lines that name old segments while the copy is placed: the reinit clears `apply_error` and `replication_unrecoverable_error` and resets the counters, no NEEDS_REINIT; later old-segment lines below the limit change nothing |
+| `dbid_collision` | E-01 | a second file with the same db_id (same name in another letter case, same folder): scansync lists it in `collisions[]`, the record keeps its tracked path, generation and GUID, replication.conf has no section for the copy, the alert `db_id_collision` names the copy, the same after a node restart; the copy removed: the record is unchanged (whether the alert is withdrawn is recorded as a note) |
+| `bandwidth_burst0` | A-02, B-05, E-02, A-09 | `PUT /v1/limits/bandwidth` refuses bad values with 400 `bad_request` (limit 0 or negative, burst below the limit, a fraction, out of range, wrong type, no body, truncated JSON), burst 0 means the configured burst, a valid pair is in `/v1/config` and `/v1/stats` and survives a node restart; wrong-type and truncated bodies give 400 `bad_json` on scansync, shipping/resume and config; a 1 MiB/s limit still converges |
+| `csrf` | G-01, G-02, G-12 (RCM) | a web login with no same-origin evidence or cross-site is 403; a session POST with a foreign `Origin`, `Sec-Fetch-Site: cross-site` or no headers is 403 `csrf`, a non-JSON body is 415, same-origin JSON reaches the route; a session GET with a foreign Origin works; Digest requests need no Origin; `X-Frame-Options: DENY` and `frame-ancestors 'none'`; the login throttle covers Digest (10 failures, then 429) and never locks the real operator out |
+| `ghost_autoreinit` | F-01, F-03, F-05 (RCM) | `POST /v1/nodes/{id}/reinit` without a usable `db_id` is 400 (truncated JSON: `bad_json`); a reinit RCM started survives an RCM restart while the master node is unreachable (the job stays running, ends `ok`/`done`, the replica converges); with a Ghost tombstone and autoreinit on, RCM never starts a reinit for the Ghost's node after the master needs a reinit (new GUID); `--parts b,c,a` |
+| `pubtables_utf8` | E-05 | quoted table names (Cyrillic, a space): publication sync keeps the exact names, rows reach every replica, one excluded stays unpublished (verify lists it as `not_published`), put back and the rows arrive |
+| `peer_removed_retention` | B-07, B-16 | `DELETE /v1/peers/{id}`: the peer leaves the peer list and the config (`config_version` moves), its ledger row is gone, the journal has `delivery_remove_peer`, cleanup now deletes the aged segments only that peer lacked, no `retention_blocked_by_apply`; the peer put back has no row yet and cleanup keeps every segment of the next load until it applied them; the peer catches up (a reinit when a gap is reported) |
+| `reinit_concurrent` | C-04 | `max_concurrent_reinits` 2 (and a 2 Mbps window): two reinits start at the same moment to two replicas (two databases, then crossed); each job is `done` with the right `peer_id`, the target replica's generation moves and the other one's does not, no `stale_generation`, each replica's `db-file-ops.jsonl` has `reinit_receive` only for its own database; converge; needs 2 databases and 2 replicas |
+| `newguid_fail_repeat` | C-08 | an operator's `nbackup -L` lock with rows committed into the delta, then the node's new GUID (`force`): refused (409 `backup_lock`) and nothing lost, the delta kept; after `nbackup -N` the repeat gives a new GUID (header = record), no lock, no delta, rows kept, no `newguid_interrupted`; every replica reinits and converges; `--target auto|companion|master` |
+| `firebirdlog_flood` | D-03 | 2000 error entries appended to the master's firebird.log: within a minute exactly one `firebird_log_error` alert with the count and the last line, at most 5 new alerts in all, standing alerts kept; after a node restart the old lines are not replayed; one fresh line raises the alert again; run on a node up for at least a minute |
+
+```bash
+python tb.py test restart_replay [--db all] [--replica R] [--restarts 2] [--no-kill] [--no-blocked-stop] [--no-master]
+python tb.py test move_crash [--db db1] [--replica R] [--kill-at witness,file,now] [--crafted backward,forward,conflict]
+python tb.py test logrotate_tail [--db db1] [--replica R] [--modes drain,truncate,rename,copytruncate] [--no-restart]
+python tb.py test reinit_stale_line [--db db1] [--replica R] [--mode standard]
+python tb.py test dbid_collision [--db D] [--load-seconds 45] [--no-restart]
+python tb.py test bandwidth_burst0 [--valid 3,7] [--tight-mbps 1] [--no-restart]
+python tb.py test csrf [--no-throttle]
+python tb.py test ghost_autoreinit [--parts b,c,a] [--db D] [--replica R]
+python tb.py test pubtables_utf8 [--db D] [--replicas R] [--rows 20]
+python tb.py test peer_removed_retention [--peer R] [--load-seconds 45]
+python tb.py test reinit_concurrent [--dbs db1,db2] [--rounds 2] [--limit 2] [--window-mbps 2]
+python tb.py test newguid_fail_repeat [--target auto] [--rows 200]
+python tb.py test firebirdlog_flood [--host H] [--lines 2000] [--no-restart]
+```
