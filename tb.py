@@ -16,7 +16,7 @@ each host and runs them over ssh. See README.md.
   tb.py goafts date --value YYYY-MM-DD|none
   tb.py goafts channel [--product-channel CH] [--self-update on|off] [--hosts ...]
   tb.py rcm up                          (a cluster RCM serves, no goafts: init, joins, releases, members)
-  tb.py rcm up --easy                   (an RCM per host as the setup makes it, pairing, cluster link)
+  tb.py rcm up --easy [--no-link]       (an RCM per host as the setup makes it, pairing, cluster link)
   tb.py rcm status|down [--yes]
   tb.py dbs prepare [--count 2] [--subdir tb] [--no-seed]
   tb.py dbs remove  [--subdir tb]
@@ -181,7 +181,7 @@ def cmd_goafts(cl, a):
 
 def cmd_rcm(cl, a):
     if a.action == "up" and a.easy:
-        RS.up_easy(cl, timeout=a.timeout)
+        RS.up_easy(cl, timeout=a.timeout, link=not a.no_link)
     elif a.action == "up":
         RS.up(cl, timeout=a.timeout)
     elif a.action == "down":
@@ -307,6 +307,8 @@ def main():
     s.add_argument("--timeout", type=int, default=1200, help="up: wait for the nodes the agents install")
     s.add_argument("--easy", action="store_true",
                    help="up: the easy install: an RCM per host as the setup makes it, pairing, then 'cluster link'")
+    s.add_argument("--no-link", action="store_true",
+                   help="up --easy: stop before the link; link the hosts in the RCM UI (Settings -> Link hosts)")
     s.add_argument("--yes", action="store_true", help="down: really remove")
 
     s = sub.add_parser("dbs")

@@ -599,7 +599,8 @@ build and the signed hqclusternode of `rcmcluster.releases`, runs
 `fbagent --cluster-init <host name>` and `fbagent --cluster-pairing on`;
 then `hqbirdrcm cluster link -hosts <addresses> -master <master>` on the RCM
 host. Start from `tb.py install --source local --components fbagent` on a
-clean stand. Linux hosts only.
+clean stand. Linux hosts only. `rcm up --easy --no-link` stops before the
+link: the operator links the hosts in the RCM (Settings → Link hosts).
 
 | Case | What it proves |
 |---|---|

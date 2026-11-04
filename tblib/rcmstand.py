@@ -317,7 +317,9 @@ def setup_host(cl, n):
     return {"hostname": name, "cluster_id": cid, "rcm_url": res["rcm_url"], "ca_hash": res["ca_hash"]}
 
 
-def up_easy(cl, timeout=1200):
+def up_easy(cl, timeout=1200, link=True):
+    """link=False stops before the link: the hosts are free with the pairing
+    window open, and the operator links them in RCM (Settings -> Link hosts)."""
     cfg = cl.cfg
     names = ops.install_order(cl, cfg.select("all"))
     ids = {n: GA.agent_id(cl, n) for n in names}
@@ -350,6 +352,12 @@ def up_easy(cl, timeout=1200):
     # opens up to that long after the setup. An operator takes longer to log in.
     inputs = [cl.h(n)["addr"] for n in names]
     wait(lambda: all(pair_call(cl, r, a).get("status") == 200 for a in inputs), 120, "pairing port 7450")
+    if not link:
+        for n in names:
+            cl.hstate(n)["installed"] = {"source": "rcm-easy", "components": ["fbagent", "rcm"]}
+        cl.save()
+        log(f"rcm: not linked: link the hosts in the RCM of {r} (Settings -> Link hosts)")
+        return
 
     # The operator links the hosts from the RCM of host r, by address.
     log(f"rcm: hqbirdrcm cluster link -hosts {','.join(inputs)} -master {cl.h(cfg.master)['addr']}")
