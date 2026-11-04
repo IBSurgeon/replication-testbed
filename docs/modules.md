@@ -219,3 +219,19 @@ the Windows modules are best-effort ports.
   `age-files --glob --days` (file times moved back), `fblog-inject --path
   --count` (error entries appended to firebird.log in Firebird's format;
   never truncates).
+
+## 94-rcmcluster — a cluster RCM serves, without goafts (Linux)
+
+Used by `tb.py rcm up|status|down` and `test nogoafts`. It follows the user
+guide, chapter 1.3: the agent's own commands run as the owner of the agent's
+folder (`sudo -u firebird ./fbagent ...`), RCM commands as `hqbirdrcm`.
+
+| Command | Does |
+|---|---|
+| `stage-rcm --binary F` | puts the RCM build in `<agent>/update/hqbirdrcm/staged/` with `.sha256` and `staged.json`, as the HQbird setup payload leaves it |
+| `init --cluster-id ID [--address A]` | `fbagent --cluster-init`: the result has `rc`, `rcm_url`, `ca_hash` |
+| `join --url U --ca-hash H --token-b64 B` | `fbagent --cluster-join` with the token in a 0600 temp file; `--fbagent-dir` can be a scratch agent |
+| `rcm --args-b64 B` | one `hqbirdrcm` command (a JSON list of arguments); the operator login comes from `TB_RCM_USER` / `TB_RCM_PASSWORD` in the secrets file |
+| `release-import --file F --product P --version V [--sig F]` | `hqbirdrcm release import` as user `hqbirdrcm` |
+| `scratch-agent --name N [--agent-id ID]` / `scratch-remove --name N` | a copy of the agent's binary and config in `/var/tmp/tb-agent-N` (no service, no cluster section, `local_api` off), for joins that must fail |
+| `facts` | the agent's id and cluster source, the CA files, the RCM unit and its user, the owners and modes of `rcm.json` and `rcm-data`, every node folder (version, managed, peers, unit), the listening ports |

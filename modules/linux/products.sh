@@ -18,6 +18,9 @@ fb_save_pristine_conf() { # ROOT
 
 fb_restore_pristine_conf() { # ROOT UNIT
   local conf="$1/replication.conf"
+  # The node's lock beside the conf: one left by a node or a CLI that ran as
+  # root (0640 root) makes the next node, as firebird, fail every conf write.
+  rm -f "$conf.lock"
   if [[ -f "$conf.tb-pristine" ]]; then
     cp -f "$conf.tb-pristine" "$conf"
     rm -f "$conf.tb-pristine"

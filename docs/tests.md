@@ -559,3 +559,32 @@ python tb.py test reinit_concurrent [--dbs db1,db2] [--rounds 2] [--limit 2] [--
 python tb.py test newguid_fail_repeat [--target auto] [--rows 200]
 python tb.py test firebirdlog_flood [--host H] [--lines 2000] [--no-restart]
 ```
+
+## nogoafts
+
+A cluster RCM serves without goafts (fbagent contract §7, user guide 1.3).
+Make the stand first with `tb.py rcm up`: it stages the RCM build, runs
+`fbagent --cluster-init` on the RCM host, imports the releases of
+`rcmcluster.releases` (vendor-signed), joins the other agents with one join
+token each, stores the members and links, and waits for every node. The
+local config needs a `rcmcluster` section (`config/testbed.example.json`) and
+`fbagent.mode install` on every host. Linux hosts only.
+
+| Case | What it proves |
+|---|---|
+| `init` | RCM runs as `hqbirdrcm`; `rcm.json` is the agent's, 0640; `rcm-data` is `hqbirdrcm`'s; `cluster-init.json` and the CAs are there; the agent's cluster source is `rcm`; 7443 listens |
+| `reinit` | `--cluster-init` again: same CA hash and URL, RCM still answers |
+| `badhash` | `--cluster-join` with a wrong CA hash (scratch agent): refused, nothing written, the token stays unused |
+| `reuse` | a scratch agent joins and is revoked; another scratch agent with the same token is refused with `token_used` |
+| `readonly` | `PUT /v1/rcm/config`: 409 `rcm_config_read_only` |
+| `unsigned` | `hqbirdrcm release import` of a file without a vendor signature: refused, not listed |
+| `members` | every node runs the mirror's version, managed by its agent; the master's peers are the replicas; RCM lists every node |
+| `status` | `hqbirdrcm cluster status` reports every member |
+| `page` | Settings → Cluster answers 200 |
+| `downgrade` | (`--downgrade-wait S`, 200 or more) an older signed hqbirdrcm in the mirror does not replace the running RCM |
+
+```bash
+python tb.py rcm up
+python tb.py test nogoafts [--only init,members] [--downgrade-wait 220]
+python tb.py rcm down --yes
+```

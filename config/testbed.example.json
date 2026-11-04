@@ -78,6 +78,15 @@
     }
   },
 
+  "rcmcluster": {
+    "_readme": "tb.py rcm up: a cluster RCM serves, without goafts (fbagent source rcm). cluster_id: a lower-case DNS label. rcm_binary: the RCM build to stage on the RCM host (default: artifacts' linux hqbirdrcm). releases: signed Linux releases for RCM's mirror; sig = the vendor signature file of file. Each host's node_id is its member id; paths.node /opt/hqclusternode/<role>, paths.rcm /opt/hqbirdrcm.",
+    "cluster_id": "",
+    "rcm_binary": "",
+    "releases": [
+      {"product": "hqclusternode", "version": "<version>", "file": "<path to hqclusternode-linux-amd64>", "sig": "<path to its .sig>"}
+    ]
+  },
+
   "loadgen": {
     "_readme": "fb-loadgen source: a git URL, or a local checkout, or a ready binary.",
     "git_url": "<git URL of fb-loadgen>",

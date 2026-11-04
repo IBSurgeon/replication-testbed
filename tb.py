@@ -15,6 +15,8 @@ each host and runs them over ssh. See README.md.
   tb.py goafts status|down [--yes]
   tb.py goafts date --value YYYY-MM-DD|none
   tb.py goafts channel [--product-channel CH] [--self-update on|off] [--hosts ...]
+  tb.py rcm up                          (a cluster RCM serves, no goafts: init, joins, releases, members)
+  tb.py rcm status|down [--yes]
   tb.py dbs prepare [--count 2] [--subdir tb] [--no-seed]
   tb.py dbs remove  [--subdir tb]
   tb.py dbs list    [--subdir tb]
@@ -41,6 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tblib import config as C          # noqa: E402
 from tblib import ops                  # noqa: E402
 from tblib import goafts as GA           # noqa: E402
+from tblib import rcmstand as RS         # noqa: E402
 from tblib.cluster import Cluster, TbError, log   # noqa: E402
 from tblib.remote import RemoteError   # noqa: E402
 import tests                           # noqa: E402
@@ -175,6 +178,18 @@ def cmd_goafts(cl, a):
     return 0
 
 
+def cmd_rcm(cl, a):
+    if a.action == "up":
+        RS.up(cl, timeout=a.timeout)
+    elif a.action == "down":
+        if not a.yes:
+            raise TbError("rcm down removes node, RCM and fbagent from the hosts: add --yes")
+        RS.down(cl)
+    else:
+        return RS.status(cl)
+    return 0
+
+
 def cmd_dbs(cl, a):
     if a.action == "prepare":
         dbs = ops.dbs_prepare(cl, a.count, a.subdir, seed=not a.no_seed)
@@ -284,6 +299,11 @@ def main():
     s.add_argument("--hosts", default="all")
     s.add_argument("--yes", action="store_true", help="down: really remove")
 
+    s = sub.add_parser("rcm", help="a stand whose cluster RCM serves, without goafts (fbagent source rcm)")
+    s.add_argument("action", choices=["up", "status", "down"])
+    s.add_argument("--timeout", type=int, default=1200, help="up: wait for the nodes the agents install")
+    s.add_argument("--yes", action="store_true", help="down: really remove")
+
     s = sub.add_parser("dbs")
     s.add_argument("action", choices=["prepare", "remove", "list"])
     s.add_argument("--count", type=int)
@@ -342,7 +362,7 @@ def main():
     try:
         cl = Cluster(C.load(a.config))
         handler = {"do": cmd_do, "hosts": cmd_hosts, "check": cmd_check, "install": cmd_install, "uninstall": cmd_uninstall,
-                   "dbs": cmd_dbs, "goafts": cmd_goafts, "loadgen": cmd_loadgen, "load": cmd_load, "verify": cmd_verify,
+                   "dbs": cmd_dbs, "goafts": cmd_goafts, "rcm": cmd_rcm, "loadgen": cmd_loadgen, "load": cmd_load, "verify": cmd_verify,
                    "status": cmd_status}.get(a.cmd)
         if handler:
             return handler(cl, a)
