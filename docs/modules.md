@@ -229,7 +229,7 @@ folder (`sudo -u firebird ./fbagent ...`), RCM commands as `hqbirdrcm`.
 | Command | Does |
 |---|---|
 | `stage-rcm --binary F` | puts the RCM build in `<agent>/update/hqbirdrcm/staged/` with `.sha256` and `staged.json`, as the HQbird setup payload leaves it |
-| `init --cluster-id ID [--address A]` | `fbagent --cluster-init`: the result has `rc`, `rcm_url`, `ca_hash` |
+| `init --cluster-id ID [--address A]` | `fbagent --cluster-init`: the result has `rc`, `rcm_url`, `ca_hash`; the first RCM admin gets `TB_RCM_PASSWORD` through `--rcm-password-file -` |
 | `join --url U --ca-hash H --token-b64 B` | `fbagent --cluster-join` with the token in a 0600 temp file; `--fbagent-dir` can be a scratch agent |
 | `rcm --args-b64 B` | one `hqbirdrcm` command (a JSON list of arguments); the operator login comes from `TB_RCM_USER` / `TB_RCM_PASSWORD` in the secrets file |
 | `release-import --file F --product P --version V [--sig F]` | `hqbirdrcm release import` as user `hqbirdrcm` |

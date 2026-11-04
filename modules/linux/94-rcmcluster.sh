@@ -9,7 +9,8 @@
 #                               payload leaves it)
 #   94-rcmcluster.sh init       --cluster-id ID [--address A] [--fbagent-dir DIR]
 #                               (fbagent --cluster-init as the agent's user:
-#                               rcm_url and ca_hash)
+#                               rcm_url and ca_hash; the first RCM admin
+#                               gets TB_RCM_PASSWORD of the secrets file)
 #   94-rcmcluster.sh join       --url URL --ca-hash H --token-b64 B64
 #                               [--fbagent-dir DIR]
 #                               (fbagent --cluster-join as the agent's user;
@@ -92,12 +93,15 @@ PY
   init)
     CID="$(arg cluster_id)"; [[ -n "$CID" ]] || die "--cluster-id required"
     ADDR="$(arg address)"
+    # The first RCM admin gets TB_RCM_PASSWORD (stdin, never in the process
+    # list): without it fbagent generates one that RCM asks to change, and
+    # 'rcm' below cannot log in.
+    read_secrets
+    INIT=(./fbagent --cluster-init "$CID")
+    [[ -n "$ADDR" ]] && INIT+=(--address "$ADDR")
+    [[ -n "${TB_RCM_PASSWORD:-}" ]] && INIT+=(--rcm-password-file -)
     set +e
-    if [[ -n "$ADDR" ]]; then
-      out="$(as_agent ./fbagent --cluster-init "$CID" --address "$ADDR" 2>&1)"
-    else
-      out="$(as_agent ./fbagent --cluster-init "$CID" 2>&1)"
-    fi
+    out="$(printf '%s\n' "${TB_RCM_PASSWORD:-}" | as_agent "${INIT[@]}" 2>&1)"
     ec=$?
     set -e
     printf '%s\n' "$out"
