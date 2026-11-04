@@ -60,11 +60,11 @@ def _b64(v):
     return base64.b64encode(v.encode()).decode()
 
 
-def rcm_cli(cl, *args, check=True):
+def rcm_cli(cl, *args, check=True, timeout=None):
     """hqbirdrcm <args> on the RCM host. Returns (rc, output)."""
     _, res, _, out = cl.module(cl.cfg.rcm_host, MODULE, "rcm",
                                {"args_b64": _b64(json.dumps(list(args))),
-                                "rcm_dir": cl.h(cl.cfg.rcm_host)["paths"]["rcm"]}, check=False)
+                                "rcm_dir": cl.h(cl.cfg.rcm_host)["paths"]["rcm"]}, check=False, timeout=timeout)
     rc, text = (res or {}).get("rc", 1), (res or {}).get("out", out or "")
     if check and rc != 0:
         raise TbError(f"hqbirdrcm {' '.join(args)}: rc {rc}: {text[-600:]}")
@@ -232,6 +232,149 @@ def up(cl, timeout=1200):
     log("rcm: the cluster is up")
 
 
+# ----------------------------------------------------------------- up easy --
+# The easy install (hqcluster-node docs/cluster-easy-install-plan.ru.md): the
+# HQbird setup makes on every host an RCM of its own (cluster id = the host
+# name) and opens the agent's pairing window (port 7450, 24 h). The operator
+# then links the hosts from one RCM: Settings -> Link hosts, or
+# 'hqbirdrcm cluster link'. The other agents join it and stop their own RCM.
+def easy_cluster_id(hostname):
+    """The cluster id the setup takes from a host name (fbagent
+    setupinstall.ClusterIDFromHost)."""
+    h = re.sub(r"[^a-z0-9]", "-", hostname.strip().lower().split(".")[0]).strip("-")
+    return h[:63].rstrip("-") or "hqcluster"
+
+
+def hostname(cl, n):
+    _, out, _ = cl.host(n).run_raw(["hostname"], check=False)
+    return (out or "").strip()
+
+
+def releases(cl):
+    return {r["product"]: r for r in conf_easy(cl).get("releases") or []}
+
+
+def conf_easy(cl):
+    """rcmcluster of the config; the easy stand needs no cluster_id."""
+    return cl.cfg.raw.get("rcmcluster") or {}
+
+
+def stage(cl, n, product, binary, sig="", version=""):
+    """A release in the agent's staging folder of host n, as the setup
+    payload leaves it (signed with sig). Returns the module's result."""
+    args = {"product": product, "binary": put_file(cl, n, binary), "version": version,
+            "fbagent_dir": cl.base_args(n)["fbagent_dir"]}
+    if sig:
+        args["sig"] = put_file(cl, n, sig)
+    _, res, _, _ = cl.module(n, MODULE, "stage", args)
+    return res or {}
+
+
+def pairing(cl, n, state="status", rcm_allow=""):
+    """fbagent --cluster-pairing on host n. Returns (rc, output)."""
+    _, res, _, out = cl.module(n, MODULE, "pairing", {"state": state, "rcm_allow": rcm_allow,
+                                                      "fbagent_dir": cl.base_args(n)["fbagent_dir"]}, check=False)
+    return (res or {}).get("rc", 1), (res or {}).get("out", out or "")
+
+
+def pair_call(cl, frm, to_addr, body=None, port=7450):
+    """GET /v1/pair/info (body None) or POST /v1/pair/join from host frm to
+    to_addr. Returns {"status" (0: no connection), "body", "fingerprint"}."""
+    cmd = "pair-info" if body is None else "pair-join"
+    args = {"host": to_addr, "port": port}
+    if body is not None:
+        args["body_b64"] = _b64(json.dumps(body))
+    _, res, _, _ = cl.module(frm, MODULE, cmd, args, check=False)
+    return res or {"status": 0}
+
+
+def setup_host(cl, n):
+    """What the HQbird setup does on host n: both cluster products staged
+    (hqclusternode signed, for RCM's mirror), fbagent --cluster-init with the
+    host name as the cluster id, the pairing window open. Returns
+    {hostname, cluster_id, rcm_url, ca_hash}."""
+    rels = releases(cl)
+    node = rels.get("hqclusternode")
+    if not node or not node.get("sig"):
+        raise TbError("rcmcluster.releases needs a signed hqclusternode (file and sig): "
+                      "the RCM mirror gets it from the agents' staging folders")
+    binary = rcm_binary(cl)
+    if not os.path.isfile(binary):
+        raise TbError(f"no RCM build {binary} (rcmcluster.rcm_binary or artifacts)")
+    rv = stage(cl, n, "hqbirdrcm", binary)
+    nv = stage(cl, n, "hqclusternode", node["file"], sig=node["sig"], version=node["version"])
+    name = hostname(cl, n)
+    cid = easy_cluster_id(name)
+    _, res, _, out = cl.module(n, MODULE, "init", {"cluster_id": cid, "fbagent_dir": cl.base_args(n)["fbagent_dir"]},
+                               check=False)
+    if not res or res.get("rc") != 0 or not res.get("ca_hash"):
+        raise TbError(f"[{n}] fbagent --cluster-init {cid} failed: {(res or {}).get('out', out)[-800:]}")
+    rc, text = pairing(cl, n, "on")
+    if rc != 0:
+        raise TbError(f"[{n}] fbagent --cluster-pairing on failed: {text[-600:]}")
+    log(f"rcm: [{n}] set up as the HQbird setup does: hqbirdrcm {rv.get('version')}, "
+        f"hqclusternode {nv.get('version')} (signed), cluster {cid}, pairing open")
+    return {"hostname": name, "cluster_id": cid, "rcm_url": res["rcm_url"], "ca_hash": res["ca_hash"]}
+
+
+def up_easy(cl, timeout=1200):
+    cfg = cl.cfg
+    names = ops.install_order(cl, cfg.select("all"))
+    ids = {n: GA.agent_id(cl, n) for n in names}
+    missing = [n for n in names if not ids[n]]
+    if missing:
+        raise TbError(f"no fbagent with an agent id on {', '.join(missing)}: "
+                      "run 'tb.py install --source local --components fbagent' first")
+    for n in names:
+        ops.detect(cl, n)
+        a = cl.base_args(n)
+        a["bases"] = GA.BASES
+        cl.module(n, "20-goafts", "cluster-prep", a)
+        st = cl.hstate(n)
+        st["fbagent_port"] = cl.fbagent_port(n)
+        st["fb_port"] = cl.fb_port(n)
+    cl.save()
+
+    r = cfg.rcm_host
+    # Easy before the setup: a setup that fails half way leaves an RCM on
+    # some hosts, and 'rcm down' removes it only on an easy stand.
+    st = sstate(cl)
+    st.clear()
+    st["easy"] = True
+    cl.save()
+    hosts = {n: setup_host(cl, n) for n in names}
+    st.update({"cluster_id": hosts[r]["cluster_id"], "ca_hash": hosts[r]["ca_hash"], "hosts": hosts})
+    cl.save()
+    wait(lambda: GA.rcm_up(cl), 120, "RCM operator port")
+    # The agent service checks the pairing window every 30 s, so port 7450
+    # opens up to that long after the setup. An operator takes longer to log in.
+    inputs = [cl.h(n)["addr"] for n in names]
+    wait(lambda: all(pair_call(cl, r, a).get("status") == 200 for a in inputs), 120, "pairing port 7450")
+
+    # The operator links the hosts from the RCM of host r, by address.
+    log(f"rcm: hqbirdrcm cluster link -hosts {','.join(inputs)} -master {cl.h(cfg.master)['addr']}")
+    rc, text = rcm_cli(cl, "cluster", "link", "-hosts", ",".join(inputs), "-master", cl.h(cfg.master)["addr"],
+                       check=False, timeout=timeout + 900)
+    st["link_out"] = text[-4000:]
+    cl.save()
+    if rc != 0:
+        raise TbError(f"cluster link: rc {rc}: {text[-1500:]}")
+    log("rcm: " + (text.strip().splitlines()[-1] if text.strip() else "linked"))
+
+    doc = rcm_json(cl, "cluster", "show")
+    st["rcm_url"] = next((f"https://{m['addresses'][0]}:{m.get('listen_port', 7443)}" for m in doc.get("members") or []
+                          if m.get("role") == "rcm" and m.get("addresses")), "")
+    st["members"] = {n: sorted(m["member_id"] for m in doc.get("members") or []
+                               if m.get("agent_id") == ids[n] and m.get("role") != "rcm") for n in names}
+    for n in names:
+        comps = ["fbagent", "rcm"] + (["node"] if n in cfg.node_hosts() else [])
+        cl.hstate(n)["installed"] = {"source": "rcm-easy", "components": comps}
+    cl.save()
+    GA.wait_members(cl, timeout)
+    log(f"rcm: the cluster {st['cluster_id']} is up: " +
+        ", ".join(f"{n}={'+'.join(v) or '-'}" for n, v in st["members"].items()))
+
+
 def wait(cond, timeout, what, poll=10):
     end = time.time() + timeout
     while time.time() < end:
@@ -247,7 +390,7 @@ def wait(cond, timeout, what, poll=10):
 def status(cl):
     cfg = cl.cfg
     rc, text = rcm_cli(cl, "cluster", "status", check=False)
-    log(f"rcm: cluster {cluster_id(cl)} status (rc {rc}):\n{text.strip()[:3000]}")
+    log(f"rcm: cluster {sstate(cl).get('cluster_id') or cluster_id(cl)} status (rc {rc}):\n{text.strip()[:3000]}")
     for n in cfg.select("all"):
         f = facts(cl, n)
         log(f"  [{n}] agent {f.get('agent_id')} source {json.dumps(f.get('cluster_source'))} "
@@ -259,13 +402,16 @@ def status(cl):
 # -------------------------------------------------------------------- down --
 def down(cl):
     """Uninstall node, RCM and fbagent from the hosts. The CAs live in the
-    agent's folder and go with it; user hqbirdrcm stays."""
+    agent's folder and go with it; user hqbirdrcm stays. On an easy stand
+    every host has an RCM (stopped and disabled but on the RCM host)."""
     cfg = cl.cfg
     names = list(reversed(ops.install_order(cl, cfg.select("all"))))
+    every_rcm = bool(sstate(cl).get("easy"))
     left = []
     for n in names:
         args = cl.base_args(n)
-        comps = ["fbagent"] + (["node"] if n in cfg.node_hosts() else []) + (["rcm"] if n == cfg.rcm_host else [])
+        comps = (["fbagent"] + (["node"] if n in cfg.node_hosts() else [])
+                 + (["rcm"] if every_rcm or n == cfg.rcm_host else []))
         args["components"] = ",".join(comps)
         if n == cfg.master:
             cl.load_stop()

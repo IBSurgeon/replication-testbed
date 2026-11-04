@@ -483,15 +483,25 @@ PY
   rcm-api)
     read_secrets
     python3 - "$(arg method GET)" "$(arg path /v1/alerts)" "$(arg body_b64)" "$(arg then_restart false)" <<'PY'
-import base64, json, os, subprocess, sys, urllib.error, urllib.request
+import base64, json, os, socket, ssl, subprocess, sys, urllib.error, urllib.request
+def rcm_base():
+    # RCM with operator_tls (the default of fbagent --cluster-init) serves
+    # HTTPS on 7444 with a certificate of its own CA; an older RCM plain HTTP.
+    tls = ssl.create_default_context()
+    tls.check_hostname, tls.verify_mode = False, ssl.CERT_NONE
+    try:
+        with socket.create_connection(("127.0.0.1", 7444), timeout=10) as s, tls.wrap_socket(s, server_hostname="127.0.0.1"):
+            return "https://127.0.0.1:7444", tls
+    except OSError:
+        return "http://127.0.0.1:7444", tls
 method, path, body, restart = sys.argv[1:5]
 user, pw = os.environ.get("TB_RCM_USER", ""), os.environ.get("TB_RCM_PASSWORD", "")
 if not user or not pw:
     sys.exit("TB_RCM_USER / TB_RCM_PASSWORD are not set (secrets rcm_user, rcm_password)")
-base = "http://127.0.0.1:7444"
+base, tls = rcm_base()
 mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
 mgr.add_password(None, base, user, pw)
-op = urllib.request.build_opener(urllib.request.HTTPDigestAuthHandler(mgr))
+op = urllib.request.build_opener(urllib.request.HTTPSHandler(context=tls), urllib.request.HTTPDigestAuthHandler(mgr))
 data = base64.b64decode(body) if body else None
 req = urllib.request.Request(base + path, data=data, method=method,
                              headers={"Content-Type": "application/json", "Accept": "application/json"})
@@ -532,14 +542,23 @@ commit;" 2>&1)"; ec=$?
     # in with the form, then ask as the page does (HX-Request: true).
     read_secrets
     python3 - "$(arg path /partials/db-table?tab=m3)" <<'PY'
-import http.cookiejar, json, os, sys, urllib.error, urllib.parse, urllib.request
+import http.cookiejar, json, os, socket, ssl, sys, urllib.error, urllib.parse, urllib.request
+def rcm_base():
+    # As in rcm-api: HTTPS with operator_tls, else plain HTTP.
+    tls = ssl.create_default_context()
+    tls.check_hostname, tls.verify_mode = False, ssl.CERT_NONE
+    try:
+        with socket.create_connection(("127.0.0.1", 7444), timeout=10) as s, tls.wrap_socket(s, server_hostname="127.0.0.1"):
+            return "https://127.0.0.1:7444", tls
+    except OSError:
+        return "http://127.0.0.1:7444", tls
 path = sys.argv[1]
 user, pw = os.environ.get("TB_RCM_USER", ""), os.environ.get("TB_RCM_PASSWORD", "")
 if not user or not pw:
     sys.exit("TB_RCM_USER / TB_RCM_PASSWORD are not set (secrets rcm_user, rcm_password)")
-base = "http://127.0.0.1:7444"
+base, tls = rcm_base()
 jar = http.cookiejar.CookieJar()
-op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+op = urllib.request.build_opener(urllib.request.HTTPSHandler(context=tls), urllib.request.HTTPCookieProcessor(jar))
 form = urllib.parse.urlencode({"username": user, "password": pw}).encode()
 try:
     # RCM 2027.4.9 (review G-01) refuses a login with no same-origin evidence.

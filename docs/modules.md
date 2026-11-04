@@ -229,9 +229,12 @@ folder (`sudo -u firebird ./fbagent ...`), RCM commands as `hqbirdrcm`.
 | Command | Does |
 |---|---|
 | `stage-rcm --binary F` | puts the RCM build in `<agent>/update/hqbirdrcm/staged/` with `.sha256` and `staged.json`, as the HQbird setup payload leaves it |
+| `stage --product P --binary F [--sig F] [--version V]` | the same for `hqclusternode` or `hqbirdrcm`; `--sig`: the first line of the vendor signature file goes into `staged.json`, so `--cluster-init` copies the release into RCM's `import/` |
+| `pairing --state on\|off\|status [--rcm-allow L]` | `fbagent --cluster-pairing` as the agent's user |
+| `pair-info --host H` / `pair-join --host H --body-b64 B` | an invitation by hand from this host to H:7450: the HTTP status, the answer and the TLS fingerprint (status 0: no connection) |
 | `init --cluster-id ID [--address A]` | `fbagent --cluster-init`: the result has `rc`, `rcm_url`, `ca_hash`; the first RCM admin gets `TB_RCM_PASSWORD` through `--rcm-password-file -` |
 | `join --url U --ca-hash H --token-b64 B` | `fbagent --cluster-join` with the token in a 0600 temp file; `--fbagent-dir` can be a scratch agent |
 | `rcm --args-b64 B` | one `hqbirdrcm` command (a JSON list of arguments); the operator login comes from `TB_RCM_USER` / `TB_RCM_PASSWORD` in the secrets file |
 | `release-import --file F --product P --version V [--sig F]` | `hqbirdrcm release import` as user `hqbirdrcm` |
 | `scratch-agent --name N [--agent-id ID]` / `scratch-remove --name N` | a copy of the agent's binary and config in `/var/tmp/tb-agent-N` (no service, no cluster section, `local_api` off), for joins that must fail |
-| `facts` | the agent's id and cluster source, the CA files, the RCM unit and its user, the owners and modes of `rcm.json` and `rcm-data`, every node folder (version, managed, peers, unit), the listening ports |
+| `facts` | the agent's id and cluster source, the CA files, the RCM unit and its user, the owners and modes of `rcm.json` and `rcm-data`, every node folder (version, managed, peers, unit), the listening ports (7450 too), `pairing.json`, `cluster/left/`, RCM's `import/` folder and whether the RCM unit is enabled |

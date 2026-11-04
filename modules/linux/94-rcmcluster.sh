@@ -7,10 +7,20 @@
 #                               (the RCM build in the agent's staging folder
 #                               update/hqbirdrcm/staged/, as the HQbird setup
 #                               payload leaves it)
+#   94-rcmcluster.sh stage      --product hqclusternode|hqbirdrcm --binary FILE
+#                               [--sig F] [--version V] [--fbagent-dir DIR]
+#                               (any cluster product; --sig: the vendor
+#                               signature goes into staged.json)
 #   94-rcmcluster.sh init       --cluster-id ID [--address A] [--fbagent-dir DIR]
 #                               (fbagent --cluster-init as the agent's user:
 #                               rcm_url and ca_hash; the first RCM admin
 #                               gets TB_RCM_PASSWORD of the secrets file)
+#   94-rcmcluster.sh pairing    --state on|off|status [--rcm-allow A,B]
+#                               (fbagent --cluster-pairing as the agent's user)
+#   94-rcmcluster.sh pair-info  --host H [--port 7450]
+#   94-rcmcluster.sh pair-join  --host H --body-b64 B64 [--port 7450]
+#                               (an invitation by hand from this host: the
+#                               HTTP status, the answer, the fingerprint)
 #   94-rcmcluster.sh join       --url URL --ca-hash H --token-b64 B64
 #                               [--fbagent-dir DIR]
 #                               (fbagent --cluster-join as the agent's user;
@@ -63,31 +73,89 @@ print("TBRESULT " + json.dumps({"rc": int(sys.argv[1]), "out": sys.argv[2][-int(
 }
 
 case "$CMD" in
-  stage-rcm)
+  stage-rcm|stage)
+    # stage --product hqclusternode|hqbirdrcm; stage-rcm is stage of hqbirdrcm.
+    # --sig F: the vendor signature file of the binary; its first line goes
+    # into staged.json, as a signed setup payload leaves it (fbagent copies
+    # a signed staged release into RCM's import/ folder at --cluster-init).
+    PROD="$(arg product hqbirdrcm)"
+    [[ "$CMD" == stage-rcm ]] && PROD=hqbirdrcm
+    [[ "$PROD" == hqbirdrcm || "$PROD" == hqclusternode ]] || die "--product: hqbirdrcm or hqclusternode"
     BIN="$(arg binary)"
     [[ -f "$BIN" ]] || die "--binary $BIN not found"
     chmod 0755 "$BIN"
-    VER="$("$BIN" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
+    VER="$(arg version)"
+    [[ -n "$VER" ]] || VER="$("$BIN" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
     [[ -n "$VER" ]] || die "$BIN version: no version"
-    DIR="$FBA_DIR/update/hqbirdrcm/staged"
+    SIGLINE=""
+    if [[ -n "$(arg sig)" ]]; then
+      [[ -f "$(arg sig)" ]] || die "--sig $(arg sig) not found"
+      SIGLINE="$(grep -m1 . "$(arg sig)" | tr -d '\r')"
+    fi
+    DIR="$FBA_DIR/update/$PROD/staged"
     U="$(agent_user)"
-    install -d -o "$U" -g "$U" -m 0750 "$FBA_DIR/update" "$FBA_DIR/update/hqbirdrcm" "$DIR"
-    rm -f "$DIR"/hqbirdrcm-* "$DIR/staged.json"
-    install -o "$U" -g "$U" -m 0755 "$BIN" "$DIR/hqbirdrcm-$VER"
-    SUM="$(sha256sum "$DIR/hqbirdrcm-$VER" | cut -d' ' -f1)"
-    echo "$SUM" >"$DIR/hqbirdrcm-$VER.sha256"
-    SIZE="$(stat -c %s "$DIR/hqbirdrcm-$VER")"
-    python3 - "$DIR/staged.json" "$VER" "$SUM" "$SIZE" <<'PY'
+    install -d -o "$U" -g "$U" -m 0750 "$FBA_DIR/update" "$FBA_DIR/update/$PROD" "$DIR"
+    rm -f "$DIR/$PROD"-* "$DIR/staged.json"
+    install -o "$U" -g "$U" -m 0755 "$BIN" "$DIR/$PROD-$VER"
+    SUM="$(sha256sum "$DIR/$PROD-$VER" | cut -d' ' -f1)"
+    echo "$SUM" >"$DIR/$PROD-$VER.sha256"
+    SIZE="$(stat -c %s "$DIR/$PROD-$VER")"
+    python3 - "$DIR/staged.json" "$VER" "$SUM" "$SIZE" "$SIGLINE" <<'PY'
 import datetime, json, sys
-path, ver, s, size = sys.argv[1:5]
+path, ver, s, size, sig = sys.argv[1:6]
 doc = {"version": ver, "sha256": s, "size": int(size), "platform": "linux-amd64",
        "staged_at_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
        "source": "replication test bed (lab build)"}
+if sig:
+    doc["signature"] = sig
 json.dump(doc, open(path, "w"), indent=2)
 PY
     chown "$U:$U" "$DIR"/*
-    log "staged hqbirdrcm $VER in $DIR"
-    result "{\"version\":\"$VER\",\"sha256\":\"$SUM\"}"
+    log "staged $PROD $VER in $DIR${SIGLINE:+ (signed)}"
+    result "{\"product\":\"$PROD\",\"version\":\"$VER\",\"sha256\":\"$SUM\",\"signed\":$([[ -n "$SIGLINE" ]] && echo true || echo false)}"
+    ;;
+
+  pairing)
+    # fbagent --cluster-pairing on|off|status [--rcm-allow A,B] as the agent's user.
+    ST="$(arg state status)"
+    [[ "$ST" == on || "$ST" == off || "$ST" == status ]] || die "--state: on, off or status"
+    P=(./fbagent --cluster-pairing "$ST")
+    [[ -n "$(arg rcm_allow)" ]] && P+=(--rcm-allow "$(arg rcm_allow)")
+    run_result as_agent "${P[@]}"
+    ;;
+
+  pair-info|pair-join)
+    # An invitation by hand, from this host to --host: GET /v1/pair/info, or
+    # POST /v1/pair/join with the JSON of --body-b64. TBRESULT {"status",
+    # "body", "fingerprint"} (status 0: no connection).
+    H="$(arg host)"; [[ -n "$H" ]] || die "--host required"
+    python3 - "$CMD" "$H" "$(arg port 7450)" "$(arg body_b64)" <<'PY'
+import base64, hashlib, json, socket, ssl, sys, http.client
+cmd, host, port, body = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+out = {"status": 0, "body": None, "fingerprint": ""}
+try:
+    c = http.client.HTTPSConnection(host, port, context=ctx, timeout=60)
+    if cmd == "pair-info":
+        c.request("GET", "/v1/pair/info")
+    else:
+        c.request("POST", "/v1/pair/join", body=base64.b64decode(body),
+                  headers={"Content-Type": "application/json"})
+    r = c.getresponse()
+    der = c.sock.getpeercert(binary_form=True)
+    out["fingerprint"] = "sha256:" + hashlib.sha256(der).hexdigest()
+    out["status"] = r.status
+    raw = r.read().decode("utf-8", "replace")
+    try:
+        out["body"] = json.loads(raw)
+    except ValueError:
+        out["body"] = raw[-2000:]
+except (OSError, socket.timeout, ssl.SSLError, http.client.HTTPException) as e:
+    out["error"] = f"{type(e).__name__}: {e}"
+print("TBRESULT " + json.dumps(out))
+PY
     ;;
 
   init)
@@ -209,8 +277,8 @@ def unit(name):
     user = ""
     if pid and pid != "0":
         user = sh("ps", "-o", "user=", "-p", pid)
-    return {"active": sh("systemctl", "is-active", name), "user": user,
-            "unit_user": sh("systemctl", "show", "-p", "User", "--value", name)}
+    return {"active": sh("systemctl", "is-active", name), "enabled": sh("systemctl", "is-enabled", name),
+            "user": user, "unit_user": sh("systemctl", "show", "-p", "User", "--value", name)}
 
 def version(binary):
     if not os.path.isfile(binary):
@@ -231,7 +299,13 @@ out["clusterca"] = sorted(os.path.relpath(p, fba) for p in glob.glob(os.path.joi
 out["rcm"] = {"unit": unit("hqbirdrcm"), "version": version(os.path.join(rcm, "hqbirdrcm")),
               "rcm_json": owner(os.path.join(rcm, "rcm.json")),
               "seed": os.path.isfile(os.path.join(rcm, "cluster-init.json")),
-              "data_dir": owner(os.path.join(rcm, "rcm-data"))}
+              "data_dir": owner(os.path.join(rcm, "rcm-data")),
+              "import": sorted(os.path.basename(p) for p in glob.glob(os.path.join(rcm, "import", "*")))}
+try:
+    out["pairing"] = json.load(open(os.path.join(fba, "cluster", "pairing.json"), encoding="utf-8"))
+except Exception:  # noqa: BLE001
+    out["pairing"] = None
+out["left"] = sorted(os.path.basename(p) for p in glob.glob(os.path.join(fba, "cluster", "left", "*")))
 nodes = {}
 for d in [x for x in os.environ.get("NODE_DIRS", "").split(",") if x]:
     info = {"version": version(os.path.join(d, "hqclusternode")),
@@ -250,11 +324,11 @@ for d in [x for x in os.environ.get("NODE_DIRS", "").split(",") if x]:
             info["unit_state"] = unit(info["unit"])
     nodes[d] = info
 out["nodes"] = nodes
-out["listen"] = sorted(set(re.findall(r"[\d.*\[\]:]+:(7443|7444|7051|7052)\b", sh("ss", "-ltn"))))
+out["listen"] = sorted(set(re.findall(r"[\d.*\[\]:]+:(7443|7444|7051|7052|7450)\b", sh("ss", "-ltn"))))
 out["hqbirdrcm_user"] = bool(sh("id", "-u", "hqbirdrcm"))
 print("TBRESULT " + json.dumps(out))
 PY
     ;;
 
-  *) die "usage: 94-rcmcluster.sh stage-rcm|init|join|rcm|release-import|scratch-agent|scratch-remove|facts [--key value ...]" ;;
+  *) die "usage: 94-rcmcluster.sh stage-rcm|stage|init|pairing|pair-info|pair-join|join|rcm|release-import|scratch-agent|scratch-remove|facts [--key value ...]" ;;
 esac

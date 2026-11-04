@@ -588,3 +588,35 @@ python tb.py rcm up
 python tb.py test nogoafts [--only init,members] [--downgrade-wait 220]
 python tb.py rcm down --yes
 ```
+
+## easyinstall
+
+The easy install (hqcluster-node `docs/cluster-easy-install-plan.ru.md`,
+user guide 1.3): the setup makes an RCM on every host and opens the agent's
+pairing window (port 7450); the operator links the hosts from one RCM. Make
+the stand first with `tb.py rcm up --easy`: on every host it stages the RCM
+build and the signed hqclusternode of `rcmcluster.releases`, runs
+`fbagent --cluster-init <host name>` and `fbagent --cluster-pairing on`;
+then `hqbirdrcm cluster link -hosts <addresses> -master <master>` on the RCM
+host. Start from `tb.py install --source local --components fbagent` on a
+clean stand. Linux hosts only.
+
+| Case | What it proves |
+|---|---|
+| `linked` | the link job ended `done`; every node runs as `<host>-<role>`, managed by its agent; RCM lists every member; every agent's cluster source is `rcm` with the linking RCM's URL |
+| `rcmoff` | the RCM of every other host is stopped and disabled, its own empty cluster is in `cluster/left/`; the linking RCM runs and is enabled |
+| `port` | no host listens on 7450 after the link |
+| `mirror` | the RCM host put the signed hqclusternode in `import/`; the mirror lists it; the nodes run that version |
+| `again` | a host in the cluster opens its window again: the port stays closed, or the invitation is 409 `agent_in_cluster` |
+| `seats` | (`--spare HOST`) a probe of the cluster hosts and one more free host: `seats_exceeded` |
+| `allow` | (`--spare HOST`) `--rcm-allow` names another RCM: an invitation from this RCM is 403 `rcm_not_allowed` |
+| `window` | (`--spare HOST`) `--cluster-pairing off`: the port closes |
+
+`--spare` is a config host outside master and replicas with a test bed
+fbagent; the test sets it up as the setup does and leaves it free.
+
+```bash
+python tb.py rcm up --easy
+python tb.py test easyinstall [--only linked,rcmoff] [--spare ubuntu4]
+python tb.py rcm down --yes
+```

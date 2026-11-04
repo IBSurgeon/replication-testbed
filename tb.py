@@ -16,6 +16,7 @@ each host and runs them over ssh. See README.md.
   tb.py goafts date --value YYYY-MM-DD|none
   tb.py goafts channel [--product-channel CH] [--self-update on|off] [--hosts ...]
   tb.py rcm up                          (a cluster RCM serves, no goafts: init, joins, releases, members)
+  tb.py rcm up --easy                   (an RCM per host as the setup makes it, pairing, cluster link)
   tb.py rcm status|down [--yes]
   tb.py dbs prepare [--count 2] [--subdir tb] [--no-seed]
   tb.py dbs remove  [--subdir tb]
@@ -179,7 +180,9 @@ def cmd_goafts(cl, a):
 
 
 def cmd_rcm(cl, a):
-    if a.action == "up":
+    if a.action == "up" and a.easy:
+        RS.up_easy(cl, timeout=a.timeout)
+    elif a.action == "up":
         RS.up(cl, timeout=a.timeout)
     elif a.action == "down":
         if not a.yes:
@@ -302,6 +305,8 @@ def main():
     s = sub.add_parser("rcm", help="a stand whose cluster RCM serves, without goafts (fbagent source rcm)")
     s.add_argument("action", choices=["up", "status", "down"])
     s.add_argument("--timeout", type=int, default=1200, help="up: wait for the nodes the agents install")
+    s.add_argument("--easy", action="store_true",
+                   help="up: the easy install: an RCM per host as the setup makes it, pairing, then 'cluster link'")
     s.add_argument("--yes", action="store_true", help="down: really remove")
 
     s = sub.add_parser("dbs")
