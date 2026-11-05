@@ -70,7 +70,8 @@ owners.
 - A failed or stopped quiesce (`gfix -shut full`) runs `gfix -online normal`
   and says whether the database is online again (hqcluster-node, branch
   `switchover`).
-- `nbackup -L` has a 30-minute limit. On a master under load, every writer
-  waits while `-L` waits.
+- `nbackup -L` stops after 2 minutes (was 30): on a master under load,
+  every writer waits while `-L` waits. The reinit then fails and can be
+  started again.
 - A hung server is not detected yet: the node reports the replica in sync,
   and the HAProxy TCP check passes.

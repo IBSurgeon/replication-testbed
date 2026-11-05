@@ -4,7 +4,7 @@
 туда и обратно, failover после выключения мастера, автоматический failover
 при отрезанном мастере; при отрезанном или перезапущенном RCM failover не
 начинается. `test switchover` — 19 из 19 (6 переключений) и 14 из 14
-(failover и автоматический failover). Найдено и исправлено 7 ошибок узла и
+(failover и автоматический failover). Найдено и исправлено 8 ошибок узла и
 RCM и 1 ошибка test bed. Открыто: Firebird 5.0.5 дважды завис при
 переключении (`docs/engine-bugs/hqbird50-shutdown-hang.en.md`).
 
@@ -16,7 +16,7 @@ RCM и 1 ошибка test bed. Открыто: Firebird 5.0.5 дважды за
 |---|---|
 | Хосты | LXD: ubuntu-1 (RCM, роутер, нагрузка), ubuntu-2 и ubuntu-3 (сервис `shop` из двух хостов, роутер на каждом); Firebird 5.0.5.1878 HQbird |
 | Конфиг | `config/testbed.nogo.local.json`, `TB_STATE_DIR=state/nogo`; `power.off/on` у ubuntu2 и ubuntu3 (`lxc stop --force` / `lxc start`) |
-| Узел и RCM | лабораторные сборки 2027.5.8.4 из ветки `switchover` (узел 13dfff7, RCM 1c8e8ea), без подписи |
+| Узел и RCM | лабораторные сборки 2027.5.8.4 из ветки `switchover` (узел 13dfff7, RCM 1c8e8ea), без подписи; последний прогон — узел 2027.5.8.5 (ab71b5c) |
 | Нагрузка | fb-loadgen write-heavy, 2–4 соединения, через роутер ubuntu-1 (`50-load --dsn`) |
 | Политика | `failover_delay_sec` 90, `max_data_loss_sec` 30, `min_interval_sec` 3600, `fence_mode route` |
 
@@ -32,6 +32,7 @@ RCM и 1 ошибка test bed. Открыто: Firebird 5.0.5 дважды за
 | `test switchover` (все случаи) | 5 из 14: переключение 2 — `nbackup -L` на новом мастере завис на 30 мин (см. §4), остальные случаи упали из-за сервиса без реплики |
 | `test switchover --only switch --rounds 6` | 19 из 19, переключения 25–37 с, quiesce 12,3–12,4 с |
 | `test switchover --only failover,rcmcut,rcmrestart,mastercut` | 14 из 14; `-check` ok через 6 с, failover через 42 с после выключения; автоматический failover за 138 с |
+| `test switchover --only switch --rounds 4`, узел 2027.5.8.5 | 13 из 13 |
 
 Нагрузка шла через роутер всё время и сама переподключалась после каждого
 переключения.
@@ -48,6 +49,7 @@ RCM и 1 ошибка test bed. Открыто: Firebird 5.0.5 дважды за
 | 6 | узел | после неудачного quiesce база оставалась в shutdown | `gfix -online normal` и ответ, вышла ли база online (13dfff7) |
 | 7 | RCM | если и online не удался, сервис оставался «ok» | сервис FAILED с подсказкой «run gfix -online normal on it by hand» (1c8e8ea) |
 | 8 | test bed | `hostctl` всегда передавал `--port` (порт Firebird): `block-peer` закрывал только 3050, а не весь адрес | для `block-peer`/`unblock-peer` порт по умолчанию не передаётся |
+| 9 | узел | `nbackup -L` был ограничен 30 минутами, как `-N` и `-F`; пока `-L` ждёт, ждут все пишущие соединения мастера | у `-L` свой предел 2 минуты (ab71b5c, сборка 2027.5.8.5); после неё `--only switch --rounds 4` — 13 из 13 |
 
 С ошибкой 8 первые прогоны «RCM отрезан» и «мастер отрезан» закрывали только
 Firebird. Это тоже полезный итог: при закрытом порте Firebird и живом узле
@@ -58,9 +60,8 @@ Firebird. Это тоже полезный итог: при закрытом п�
 - **Firebird 5.0.5.1878 HQbird завис дважды** (`docs/engine-bugs/hqbird50-shutdown-hang.en.md`):
   в `gfix -shut full -force 0` на старом мастере (взаимоблокировка, стеки
   gdb) и в `nbackup -L` на новом мастере (стеков нет). Во втором случае
-  нагрузка стояла 30 минут.
-- `nbackup -L` в узле ограничен 30 минутами; пока `-L` ждёт, ждут все
-  пишущие соединения мастера. Нужен короткий предел для `-L`.
+  нагрузка стояла 30 минут; теперь узел останавливает `-L` через 2 минуты
+  (ошибка 9).
 - Зависший Firebird не обнаруживается: узел показывает реплику IN_SYNC,
   TCP-проверка HAProxy проходит, автоматический failover не начнётся.
 - После failover мастер в `where` — NEEDS_REINIT, пока сервис без реплики.
