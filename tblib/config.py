@@ -98,7 +98,10 @@ class Config:
         out = {"name": name, "os": os_name, "ssh": h.get("ssh", ""),
                "ssh_port": int(h.get("ssh_port", 22)), "sudo": bool(h.get("sudo", False)),
                "addr": h.get("addr", ""), "node_id": h.get("node_id", f"tb-{name}"),
-               "node_port": int(h.get("node_port", 7051))}
+               "node_port": int(h.get("node_port", 7051)),
+               # power.off / power.on: local commands that switch the host off
+               # and on (a hypervisor CLI); empty = tests that lose a host skip.
+               "power": _merge({"off": "", "on": ""}, h.get("power", {}))}
         for section in ("firebird", "fbagent", "paths"):
             out[section] = _merge(base[section], h.get(section, {}))
         role = "master" if name == self.master else "replica"

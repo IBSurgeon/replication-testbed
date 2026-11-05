@@ -156,8 +156,10 @@ class Cluster:
                 "db_root": h["paths"]["db_root"]}
 
     def hostctl(self, name, cmd, args=None, check=True, timeout=None):
-        a = {"node_dir": self.h(name)["paths"]["node"], "fb_root": self.h(name)["firebird"]["root"],
-             "port": self.fb_port(name)}
+        a = {"node_dir": self.h(name)["paths"]["node"], "fb_root": self.h(name)["firebird"]["root"]}
+        # block-peer without --port blocks the whole address: no default port.
+        if cmd not in ("block-peer", "unblock-peer"):
+            a["port"] = self.fb_port(name)
         a.update(args or {})
         rc, res, _, out = self.module(name, "90-hostctl", cmd, a, check=check, timeout=timeout)
         return res if rc == 0 else None

@@ -165,6 +165,7 @@ Logs and pid files: `<work>/load/<tag>/`.
 | `--extended` | `true`: bulk and heavy operations too; `false`: classic run |
 | `--conns` | `MIN:MAX` connections per process |
 | `--minutes` | `0`: until `stop` |
+| `--dsn` | `HOST/PORT:ALIAS`: one fb-loadgen on this DSN instead of the test databases (a router of an RCM service); the file need not be on this host |
 
 fb-loadgen takes the password only as `--pass`, so it shows in the process
 list of the master host.
@@ -175,7 +176,8 @@ list of the master host.
 certs), `node-svc stop|start|restart|kill`, `fb-svc stop|start|restart|status`,
 `counts` (row count of every user table; keyed tables must match),
 `limbo` (`gfix -list`), `files`, `remove-file`, `block-peer` / `unblock-peer`
-(iptables on Linux, Windows Firewall rules on Windows), `tail`,
+(iptables on Linux, Windows Firewall rules on Windows; with `--port` one
+port of the address, without it the whole address), `tail`,
 `replctl --dir D` (Firebird's replica control files `{GUID}` in a journal
 source folder: applied position, `db_sequence`, active transactions).
 

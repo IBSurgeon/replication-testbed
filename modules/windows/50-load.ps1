@@ -1,6 +1,7 @@
 # Module 50 (Windows): run fb-loadgen load on test databases.
 #
-#   50-load.ps1 start  (--dbs FILE1,FILE2 | --dir DIR) [--host localhost] [--port 3050]
+#   50-load.ps1 start  (--dbs FILE1,FILE2 | --dir DIR | --dsn HOST/PORT:ALIAS)
+#                      [--host localhost] [--port 3050]
 #                      [--mode write|read|mixed|spike|oltp-emul] [--tx off|emul-safe|full]
 #                      [--limbo false] [--extended true] [--conns 1:4] [--minutes 0]
 #                      [--think-ms 50] [--tag load]
@@ -35,7 +36,9 @@ switch ($p.Cmd) {
     Load-Secrets
     if (-not (Test-Path -LiteralPath $Lg)) { Die "fb-loadgen is not installed (40-loadgen.ps1 install)" }
     $dbs = @()
-    if (Arg $A "dbs") { $dbs = (Arg $A "dbs").Split(",") }
+    $byDsn = [bool](Arg $A "dsn")
+    if ($byDsn) { $dbs = @(Arg $A "dsn") }
+    elseif (Arg $A "dbs") { $dbs = (Arg $A "dbs").Split(",") }
     else {
       $dir = Arg $A "dir"
       if (-not $dir) { Die "--dbs or --dir is required" }
@@ -60,11 +63,16 @@ switch ($p.Cmd) {
     if ((Pid-Files $Tag).Count -gt 0) { Die "tag '$Tag' is already running; stop it first" }
     $n = 0
     foreach ($db in $dbs) {
-      if (-not (Test-Path -LiteralPath $db)) { Die "no database $db" }
-      $base = (Split-Path -Leaf (Split-Path -Parent $db)) + "-" + (Split-Path -Leaf $db).Replace(".", "_")
+      if ($byDsn) {
+        $dsn = $db
+        $base = "dsn-" + ($db.Substring($db.LastIndexOf(":") + 1) -replace '[^A-Za-z0-9_-]', '_')
+      } else {
+        if (-not (Test-Path -LiteralPath $db)) { Die "no database $db" }
+        $dsn = (Arg $A "host" "localhost") + "/" + (Arg $A "port" "3050") + ":" + $db
+        $base = (Split-Path -Leaf (Split-Path -Parent $db)) + "-" + (Split-Path -Leaf $db).Replace(".", "_")
+      }
       foreach ($prof in $profiles) {
         $name = "$base-$prof"
-        $dsn = (Arg $A "host" "localhost") + "/" + (Arg $A "port" "3050") + ":" + $db
         $lgArgs = @("--profile", $prof, "--dsn", "`"$dsn`"", "--user", $env:ISC_USER, "--pass", "`"$($env:ISC_PASSWORD)`"",
           "--tx-variants", $tx) + $extra + @("--conn-min", $conns[0], "--conn-max", $conns[-1],
           "--think-ms", (Arg $A "think_ms" "50"), "--warmup", "5", "--main", "$main", "--cooldown", "5",

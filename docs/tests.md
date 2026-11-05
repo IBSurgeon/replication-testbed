@@ -621,3 +621,33 @@ python tb.py rcm up --easy
 python tb.py test easyinstall [--only linked,rcmoff] [--spare ubuntu4]
 python tb.py rcm down --yes
 ```
+
+## switchover
+
+The cluster switchover API (hqcluster-node `docs/cluster-switchover-api-plan.ru.md`,
+stages 1-5): switchover, failover and automatic failover of an RCM service.
+Make the stand with `tb.py rcm up` and a service of two hosts whose routers
+(HAProxy) run on the hosts; fb-loadgen on `--load-host` (default the RCM
+host). The load runs through the router of the load host for the whole test
+(`50-load --dsn`). Linux hosts only.
+
+| Case | What it proves |
+|---|---|
+| `switch` | `--rounds` switchovers back and forth: each ends `ok` at the next epoch with the quiesce step done; the old master is the replica again; every router routes to the new master at that epoch; the load commits again |
+| `failover` | the master host is powered off (`hosts.<h>.power.off`; skipped without it): `failover -check` passes, the failover with `-accept-data-loss` ends `ok` at the next epoch, the load commits again; powered on (`power.on`), the old master is fenced; rejoin |
+| `rcmcut` | auto failover on; the RCM host loses the network to the service hosts for `--cut` s: no failover (only the RCM host's router misses the master) |
+| `rcmrestart` | auto failover on; RCM restarts: no failover (RCM waits `failover_delay_sec` after its start) |
+| `mastercut` | auto failover on; the master host loses the network to every other host: RCM fails over by itself, the rule turns itself off, `last_auto_failover` names the witnesses; the network comes back, the old master is fenced; rejoin |
+
+Each case puts back what it changed: blocks removed, host powered on, the
+whole policy restored. `mastercut` sets `min_interval_sec` to 60 while it
+runs, so it can run again within the hour.
+
+`power.off` and `power.on` are commands run on the operator machine, e.g. for
+an LXD container `ssh <lxd-host> lxc stop <container> --force` and
+`ssh <lxd-host> lxc start <container>`. They go in the local config only.
+
+```bash
+python tb.py rcm up
+python tb.py test switchover [--only switch,mastercut] [--rounds 2] [--cut 150] [--no-load]
+```

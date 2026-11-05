@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Module 50 (Linux): run fb-loadgen load on test databases.
 #
-#   50-load.sh start  (--dbs FILE1,FILE2 | --dir DIR) [--host localhost] [--port 3050]
+#   50-load.sh start  (--dbs FILE1,FILE2 | --dir DIR | --dsn HOST/PORT:ALIAS)
+#                     [--host localhost] [--port 3050]
 #                     [--mode write|read|mixed|spike|oltp-emul]
 #                     [--tx off|emul-safe|full] [--limbo false] [--extended true]
 #                     [--conns 1:4] [--minutes 0] [--think-ms 50] [--tag load]
@@ -10,6 +11,9 @@
 #
 # One fb-loadgen process per database (mixed: two per database, one
 # write-heavy and one read-heavy). --dir takes every *.fdb below DIR.
+# --dsn loads one database by a full DSN, e.g. a service alias behind a
+# router: the file need not be on this host. fb-loadgen opens new
+# connections when old ones break (a switchover or failover).
 #
 # --tx off        the same transaction kind all the time
 # --tx emul-safe  isolation / wait / completion change per transaction
@@ -40,7 +44,8 @@ case "$CMD" in
   start)
     load_secrets
     [[ -x "$LG" ]] || die "fb-loadgen is not installed (40-loadgen.sh install)"
-    if [[ -n "$(arg dbs)" ]]; then IFS=',' read -r -a DBS <<<"$(arg dbs)"
+    if [[ -n "$(arg dsn)" ]]; then DBS=("$(arg dsn)")
+    elif [[ -n "$(arg dbs)" ]]; then IFS=',' read -r -a DBS <<<"$(arg dbs)"
     else
       DIR="$(arg dir)"; [[ -n "$DIR" ]] || die "--dbs or --dir is required"
       mapfile -t DBS < <(find "$DIR" -type f \( -name '*.fdb' -o -name '*.FDB' \) | sort)
@@ -66,11 +71,16 @@ case "$CMD" in
     if [[ -n "$(pids_of "$TAG")" ]]; then die "tag '$TAG' is already running; stop it first"; fi
     n=0
     for db in "${DBS[@]}"; do
-      [[ -f "$db" ]] || die "no database $db"
-      base="$(basename "$(dirname "$db")")-$(basename "$db" | tr '.' '_')"
+      if [[ -n "$(arg dsn)" ]]; then
+        dsn="$db"; base="dsn-$(printf '%s' "${db##*:}" | tr -c 'A-Za-z0-9_-' '_')"
+      else
+        [[ -f "$db" ]] || die "no database $db"
+        dsn="$(arg host localhost)/$(arg port 3050):$db"
+        base="$(basename "$(dirname "$db")")-$(basename "$db" | tr '.' '_')"
+      fi
       for prof in "${PROFILES[@]}"; do
         name="$base-$prof"
-        setsid nohup "$LG" --profile "$prof" --dsn "$(arg host localhost)/$(arg port 3050):$db" \
+        setsid nohup "$LG" --profile "$prof" --dsn "$dsn" \
           --user "$ISC_USER" --pass "$ISC_PASSWORD" --tx-variants "$TX" "${EXTRA[@]}" \
           --conn-min "$CMIN" --conn-max "$CMAX" --think-ms "$(arg think_ms 50)" \
           --warmup 5 --main "$MAIN" --cooldown 5 --report-every 30 \

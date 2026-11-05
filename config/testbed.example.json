@@ -141,6 +141,8 @@
       "_ports": "firebird.port / fbagent.port: 0 = from the host (RemoteServicePort in firebird.conf, else 3050; local_api.listen of an existing agent, else 13055).",
       "_companion": "Optional (Linux, install --source local): a master-role node next to this replica on the same Firebird, for 'test promote'. Rename to 'companion' to use it. Default port 7061; it must differ from node_port.",
       "_companion_example": { "node_id": "tb-replica1-m", "node_port": 7061 },
+      "_power": "Optional: commands run on THIS machine that switch the host off (hard, as a power loss) and on, for 'test switchover --only failover'. Example for an LXD container: ssh <lxd-host> lxc stop <container> --force.",
+      "power": { "off": "", "on": "" },
       "firebird": { "root": "", "port": 0, "service": "" },
       "fbagent": { "mode": "install", "dir": "", "port": 0, "instance_id": "", "service": "" },
       "paths": { "work": "", "node": "", "rcm": "", "db_root": "" }
