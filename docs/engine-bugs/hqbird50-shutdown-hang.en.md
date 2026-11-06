@@ -251,6 +251,19 @@ the GC's last `TRA_commit`. The same 10 s limit can free a `Database`
 under any GC that needs more than 10 s at close (from the code, not
 tested). Details: `hqbird50-shutdown-hang-repro.ru.md`.
 
+## Third tested patch: AlexPeshkoff's 12.patch (2026-11-06)
+
+`hqbird50-shutdown-hang-alex12.patch`: `ensureCachePresence()` attaches
+before it takes `populateMutex`. Build 1878 with this patch only: on Linux
+it hangs in iteration 1 in 2 of 2 runs (default settings and 1 CPU). The
+cycle now closes on the `spCache` `Sync` in `Mapping::mapUser()`: the
+rejected attachment holds it in `SYNC_EXCLUSIVE` during
+`mainHandle.attach()` (`Mapping.cpp:1646`), and the GC waits for it in
+`SYNC_SHARED` (`Mapping.cpp:1634`). On Windows (1 core) it
+crashed in 4 of 4 runs: bug 3 (freed `JTransaction`), which the patch does
+not touch. Report (in Russian):
+`hqbird50-shutdown-hang-alex12.ru.md`.
+
 ## Hang 2: no stacks
 
 The host was powered off before the stacks were taken. After the restart

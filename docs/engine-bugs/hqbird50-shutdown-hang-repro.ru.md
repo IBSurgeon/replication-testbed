@@ -565,3 +565,12 @@ Linux — контейнер LXD, 2 vCPU, `hqbird50-shutdown-hang-min.sh`, 40 и
 останавливает `cdb` из `catch-crash.ps1`. Сервер под отладчиком не
 завершается, пока работает `cdb`, а `cdb` держит открытыми DLL сервера, и
 каталог стенда нельзя удалить.
+
+### Патч AlexPeshkoff `12.patch`
+
+Отдельный отчёт: [hqbird50-shutdown-hang-alex12.ru.md](hqbird50-shutdown-hang-alex12.ru.md).
+Сборка 1878 только с `12.patch` (подключение в `ensureCachePresence()` до
+захвата `populateMutex`): на Linux зависание в итерации 1 в 2 запусках из
+2 — цикл замыкается на `Sync` кэша `spCache` в `Mapping::mapUser()`
+(второй вариант цикла). На Windows (1 ядро)
+падение в 4 запусках из 4 — третья ошибка, её патч не трогает.

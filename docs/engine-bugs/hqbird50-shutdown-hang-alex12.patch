@@ -1,0 +1,35 @@
+diff --git a/src/jrd/Mapping.cpp b/src/jrd/Mapping.cpp
+index 10090d0be9..0b05933d60 100644
+--- a/src/jrd/Mapping.cpp
++++ b/src/jrd/Mapping.cpp
+@@ -1321,17 +1321,22 @@ bool Mapping::ensureCachePresence(RefPtr<Mapping::Cache>& cache, const char* ali
+ 	g.leave();
+ 
+ 	// Std safe check for data presence in cache
+-	if (cache->dataFlag)
+-		return false;
+-	MutexLockGuard g2(cache->populateMutex, FB_FUNCTION);
+ 	if (cache->dataFlag)
+ 		return false;
+ 
+-	// Create db attachment if missing it and populate cache from it
+-	bool down = hdb.attach(alias, cryptCb) || cache->populate(hdb);
+-	if (down)
+-		cache = nullptr;
+-	return down;
++	if (!hdb.attach(alias, cryptCb))
++	{
++		MutexLockGuard g2(cache->populateMutex, FB_FUNCTION);
++		if (cache->dataFlag)
++			return false;
++
++		// Create db attachment if missing it and populate cache from it
++		if (!cache->populate(hdb))
++			return false;
++	}
++
++	cache = nullptr;
++	return true;
+ }
+ 
+ 
