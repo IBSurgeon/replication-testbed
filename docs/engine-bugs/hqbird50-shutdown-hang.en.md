@@ -20,7 +20,8 @@ stopped answering:
 | 5 | 2026-11-05 18:56:57 | `gfix -shut full -force 0` on the old master, build with the fix, engine debug info installed | the same deadlock; full analysis below |
 
 Hangs 1, 4 and 5 are one bug: a deadlock between a failed attachment that
-is traced and the garbage collector thread. It needs a **user trace
+is traced and the garbage collector thread. A build with a fix for it and
+for two crashes in the same path passed every check (see "A tested fix"). It needs a **user trace
 session** on the server. On the stand, fbagent runs these sessions
 (`fbtracemgr`). With the fbagent trace tasks switched off, 40 switchovers
 under the same load had no hang (40 of 40, 39-94 s each). A minimal script
@@ -195,6 +196,26 @@ Ideas for the engine team; any one of them breaks the cycle:
    attachment with `dpb_map_attach`; leave the `Database` to the outer
    attachment.
 
+## A tested fix: build fix15t (2026-11-06)
+
+Fix 1 above, plus two crash fixes that the shutdown path showed once the
+deadlock was gone. The diff against the 5.0.5.1878 tree of the build with
+the fix is `hqbird50-shutdown-hang-fix15t.diff` (three files):
+
+| Change | File | What it fixes |
+|---|---|---|
+| Fix 1: a failed attachment does not map the trace session user (no `Mapping`, no `setDb`); the check uses the session user name | `jrd/trace/TraceManager.cpp` | the deadlock of hangs 1, 4 and 5 |
+| `RefPtr<Cache> keep(cache)` while `populateMutex` is locked | `jrd/Mapping.cpp` | `clearCache` removed the cache meanwhile, `cache = nullptr` released the last reference, the destructor destroyed a locked mutex: `pthread_mutex_destroy` EBUSY, abort in `gfix -online normal` |
+| `JAttachment::startTransaction` makes the `JTransaction` interface inside the `EngineContextHolder` scope | `jrd/jrd.cpp` | a forced shutdown (`gfix -shut full -force 0`) purged the attachment as soon as its lock was free, and the new transaction was already freed: SIGSEGV in `jrd_tra::getInterface` (`tra.cpp:3859`) |
+
+Proposal 2 is not in the build: fix 1 alone breaks the cycle.
+
+| | |
+|---|---|
+| libEngine13.so | md5 `63a599644b74727f03977433d528485f`, build-id `f76112f2773e776a563c9b5e2d340190a164c0a4` (debug file md5 `87c4eb89a2c682235095fe9832a3df07`) |
+| Minimal script (`hqbird50-shutdown-hang-min.sh`, a user trace session) | original engine: hung in 11 of 11 runs; fix 1 only: no hang in 192 iterations, but aborts and the SIGSEGV; fix15t: **10 runs × 40 iterations, no hang, no abort, no crash** |
+| The stand (ubuntu-1..3, fbagent trace tasks on again) | **40 switchovers under load: 40 of 40, 121 of 121 cases, 41-66 s each (median 50.5 s), no hang, no crash** |
+
 ## Hang 2: no stacks
 
 The host was powered off before the stacks were taken. After the restart
@@ -212,8 +233,12 @@ thread, the mutex owners and a core.
 - `nbackup -L` stops after 2 minutes (was 30): on a master under load,
   every writer waits while `-L` waits. The reinit then fails and can be
   started again.
-- A hung server is not detected yet: the node reports the replica in sync,
-  and the HAProxy TCP check passes.
-- Workaround on the stand: the fbagent trace tasks are switched off
-  (`trace_monitor`, `trace_monitor_conflicts`, `watch_trace_sessions`,
-  `trace_watchdog`, `conflict_trace`).
+- A hung server is detected (node protocol minor 22, branch `switchover`):
+  the node attaches to a database every minute (10 s allowed) and after one
+  minute without an answer raises the alert `firebird_not_answering`; RCM
+  moves the service to `failed`, and `hqbirdrcm resume` brings it back once
+  Firebird answers again. The HAProxy TCP check alone does not see it.
+- The stand ran with the fbagent trace tasks switched off (`trace_monitor`,
+  `trace_monitor_conflicts`, `watch_trace_sessions`, `trace_watchdog`,
+  `conflict_trace`) until the fix15t build was installed on 2026-11-06; they
+  are on again.

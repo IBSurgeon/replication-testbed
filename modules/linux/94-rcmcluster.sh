@@ -67,9 +67,12 @@ run_result() {
   local out ec
   set +e; out="$("$@" 2>&1)"; ec=$?; set -e
   [[ "$QUIET" == 1 ]] || printf '%s\n' "$out"
-  python3 -c '
+  # The output goes in through stdin: as an argument, a long one (operations
+  # list) failed with "Argument list too long".
+  printf '%s' "$out" | python3 -c '
 import json, sys
-print("TBRESULT " + json.dumps({"rc": int(sys.argv[1]), "out": sys.argv[2][-int(sys.argv[3]):]}))' "$ec" "$out" "$OUT_LIMIT"
+out = sys.stdin.read()
+print("TBRESULT " + json.dumps({"rc": int(sys.argv[1]), "out": out[-int(sys.argv[2]):]}))' "$ec" "$OUT_LIMIT"
 }
 
 case "$CMD" in

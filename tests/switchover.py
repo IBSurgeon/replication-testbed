@@ -5,11 +5,20 @@ only one) whose routers run on the hosts, and fb-loadgen on --load-host.
 
   switch      --rounds switchovers back and forth: each ends ok at the next
               epoch, the old master is the replica again (rejoin), every
-              router routes to the new master, the load goes on
+              router routes to the new master, the load goes on; at the end
+              no new ORPHANED replica record is on the service nodes, and
+              each master node keeps at most one (the old master's)
+  hung        the master's Firebird is stopped (SIGSTOP): it takes TCP
+              connections but answers nothing. RCM fails the service (node
+              protocol minor 22); SIGCONT; resume brings it back to ok at the
+              same epoch
   failover    the master host is powered off (hosts.<h>.power.off/on in the
               local config; skipped without them); a failover by hand with
               accept_data_loss; power on; the old master is fenced at its
-              first answer; rejoin
+              first answer; rejoin. --fence-mode sets policy.fence_mode for
+              the case. --disable-table takes that table out of the
+              publication of the master first: the failover carries it to the
+              new master from the old master's last stats (minor 23)
   rcmcut      with auto failover on, the RCM host loses the network to the
               service hosts for --cut seconds: no failover starts
   rcmrestart  with auto failover on, RCM restarts: no failover starts
@@ -20,17 +29,19 @@ only one) whose routers run on the hosts, and fb-loadgen on --load-host.
 Every case undoes what it changed in a finally block (blocks removed, host
 powered on, the policy put back). Linux hosts only (HAProxy routers)."""
 import json
+import posixpath
 import re
 import subprocess
 import time
 
 from tblib import rcmstand as RS
-from tblib.cluster import TbError, log
+from tblib.cluster import TbError, log, parse_output
+from tblib.remote import b64
 from tblib.results import Results
 
 HELP = "switchover back and forth, failover of a lost host, automatic failover chaos (RCM service, under load)"
 
-CASES = ["switch", "failover", "rcmcut", "rcmrestart", "mastercut"]
+CASES = ["switch", "hung", "failover", "rcmcut", "rcmrestart", "mastercut"]
 TAG = "switchover"
 
 
@@ -40,6 +51,11 @@ def add_args(p):
     p.add_argument("--rounds", type=int, default=2, help="switch: number of switchovers")
     p.add_argument("--settle", type=int, default=180, help="seconds for routers and the rejoined replica to settle")
     p.add_argument("--cut", type=int, default=150, help="rcmcut/rcmrestart: seconds to watch (more than failover_delay_sec)")
+    p.add_argument("--hung-wait", type=int, default=360, help="hung: seconds to wait for the failed service")
+    p.add_argument("--fence-mode", default="", choices=["", "route", "shutdown"],
+                   help="failover: policy.fence_mode for the case (default: as it is)")
+    p.add_argument("--disable-table", default="",
+                   help="failover: a table to take out of the publication before (one the load does not write)")
     p.add_argument("--load-host", default="", help="host that runs fb-loadgen through its router (default: the RCM host)")
     p.add_argument("--no-load", action="store_true", help="run without load")
 
@@ -178,6 +194,81 @@ class Stand:
             time.sleep(10)
         return False
 
+    def wait_state(self, state, timeout):
+        """The service document once its state is state, or the last one."""
+        end = time.time() + timeout
+        s = {}
+        while time.time() < end:
+            s = self.service()
+            if s.get("state") == state:
+                break
+            time.sleep(10)
+        return s
+
+    def orphaned(self):
+        """{"masters": [...], "replicas": [...]}: 'db_id on node' of each
+        ORPHANED record of the service's nodes, by the list RCM files it in."""
+        _, text, doc = self.rcm("databases")
+        if not doc:
+            raise TbError(f"databases: {text[-300:]}")
+        nodes = {n for m in self.service().get("members", []) for n in (m.get("master_node"), m.get("replica_node"))}
+        return {kind: sorted(f"{r.get('db_id')} on {r.get('node_id')}"
+                             for g in doc.get("databases", []) for r in g.get(kind) or []
+                             if r.get("state") == "ORPHANED" and r.get("node_id") in nodes)
+                for kind in ("masters", "replicas")}
+
+    # --- nodes --------------------------------------------------------------
+    def node_api(self, hostname, role, method, path, body=None, timeout=60):
+        """The node API of the <role> node (master or replica) of a service
+        host, with that node's certificate. 'rcm up' installs the two nodes
+        of a host side by side, /opt/hqclusternode/<role>, and paths.node is
+        one of them. Returns (status, body)."""
+        n = self.tb(hostname)
+        node_dir = posixpath.join(posixpath.dirname(self.cl.h(n)["paths"]["node"].rstrip("/")), role)
+        argv = ["node-api", "--node-dir", node_dir, "--method", method, "--path", path, "--timeout", str(timeout)]
+        if body is not None:
+            argv += ["--body-b64", b64(json.dumps(body))]
+        self.cl.ready(n)
+        _, out, _ = self.cl.host(n).module("90-hostctl", argv, stream=False, timeout=timeout + 60)
+        res, _ = parse_output(out)
+        if not isinstance(res, dict) or "status" not in res:
+            raise TbError(f"[{n}] bad api answer for {method} {path}: {out[-500:]}")
+        return int(res["status"]), res.get("body")
+
+    def disabled_tables(self, hostname, db_id):
+        """The tables taken out of the publication of the master database."""
+        st, body = self.node_api(hostname, "master", "GET", f"/v1/databases/{db_id}/publication/tables")
+        if st != 200:
+            raise TbError(f"publication tables of {db_id} on {hostname}: {st} {json.dumps(body)[:300]}")
+        return sorted(x["name"] for x in body.get("tables") or [] if x.get("disabled"))
+
+    def publication_list(self, hostname, db_id):
+        """disabled_tables, or None when the node gives no list (HQbird
+        2.5/3.0, no db_id)."""
+        if not db_id:
+            return None
+        try:
+            return self.disabled_tables(hostname, db_id)
+        except TbError:
+            return None
+
+    def set_disabled_tables(self, hostname, db_id, names):
+        st, body = self.node_api(hostname, "master", "PUT", f"/v1/databases/{db_id}/publication/tables",
+                                 {"disabled": list(names)})
+        if st != 200:
+            raise TbError(f"set publication tables of {db_id} on {hostname}: {st} {json.dumps(body)[:300]}")
+
+    def firebird_signal(self, hostname, sig):
+        """kill -<sig> the Firebird server process of a service host (the one
+        under hosts.<h>.firebird.root, not fbguard)."""
+        n = self.tb(hostname)
+        exe = posixpath.join(self.cl.h(n)["firebird"]["root"], "bin", "firebird")
+        cmd = (f"sh -c 'n=0; for p in $(pgrep -x firebird); do "
+               f"[ \"$(readlink /proc/$p/exe)\" = {exe} ] && kill -{sig} $p && n=$((n+1)); done; [ $n -gt 0 ]'")
+        rc, out, err = self.cl.host(n).run_raw(cmd, check=False, timeout=60)
+        if rc != 0:
+            raise TbError(f"kill -{sig} firebird on {hostname}: rc {rc}: {(out + err)[-200:]}")
+
     # --- hosts --------------------------------------------------------------
     def tb(self, hostname):
         return self.by_hostname[hostname]
@@ -234,10 +325,12 @@ def op_summary(doc):
 
 # ------------------------------------------------------------------ cases --
 def case_switch(t, a, res):
+    before = set(t.orphaned()["replicas"])
     for i in range(1, a.rounds + 1):
         frm = t.master_host()
         to = t.other(frm)
         e0 = t.service()["epoch"]
+        pub0 = t.publication_list(frm, t.where()["master"]["db_id"])
         t0 = time.time()
         rc, text, doc = t.rcm("switchover", "-service", t.svc_id, "-to", to)
         took = time.time() - t0
@@ -254,8 +347,64 @@ def case_switch(t, a, res):
               where={"epoch": w.get("epoch"), "state": w.get("state"),
                      "routers": [(r.get("active"), r.get("epoch")) for r in w.get("routers") or []],
                      "replicas": [(r.get("host"), r.get("state")) for r in w.get("replicas") or []]})
+        # The new master takes out of the publication what the old one did,
+        # no more: its record from an earlier term keeps that term's list.
+        pub1 = t.publication_list(to, (w.get("master") or {}).get("db_id") or "")
+        if pub0 is not None and pub1 is not None:
+            check(res, f"switch {i}: the new master has the publication list of the old one", {"same list": pub1 == pub0},
+                  old=pub0, new=pub1)
         if not a.no_load:
             res.record(f"switch {i}: load commits again", "PASS" if t.load_moves() else "FAIL")
+    # The rejoin forgets the donor's record (RCM rejoin_cleanup); before,
+    # each switchover left one more. The old master's record stays ORPHANED:
+    # it carries the generation the next switchover back continues, so each
+    # master node keeps at most one. Replica records older than the case are
+    # only listed: forgetdatabase removes them.
+    left = t.orphaned()
+    new = sorted(set(left["replicas"]) - before)
+    per_node = {}
+    for r in left["masters"]:
+        node = r.rsplit(" on ", 1)[-1]
+        per_node[node] = per_node.get(node, 0) + 1
+    check(res, "switch: no new ORPHANED replica record, one old master record at most per node",
+          {"no new replica record": not new, "one per master node": all(n <= 1 for n in per_node.values())},
+          orphaned_new=new, orphaned_older=sorted(set(left["replicas"]) & before), old_masters=left["masters"])
+
+
+def case_hung(t, a, res):
+    host = t.master_host()
+    e0 = t.service()["epoch"]
+    stopped = False
+    try:
+        t.firebird_signal(host, "STOP")
+        stopped = True
+        t0 = time.time()
+        s = t.wait_state("failed", a.hung_wait)
+        check(res, f"hung: Firebird of {host} stopped -> the service fails", {"failed": s.get("state") == "failed"},
+              seconds=round(time.time() - t0), state=s.get("state"), reason=s.get("state_reason", ""))
+    finally:
+        if stopped:
+            t.firebird_signal(host, "CONT")
+    # The node withdraws firebird_not_answering at its next answer (it tries
+    # every minute); resume refuses until then.
+    t0 = time.time()
+    doc = None
+    while time.time() - t0 < 240:
+        _, _, doc = t.rcm("resume", "-service", t.svc_id, "-check")
+        if doc and doc.get("ok"):
+            break
+        time.sleep(10)
+    check(res, "hung: resume -check passes after SIGCONT", {"ok": bool(doc and doc.get("ok"))},
+          seconds=round(time.time() - t0), problems=(doc or {}).get("problems"))
+    rc, text, doc = t.rcm("resume", "-service", t.svc_id)
+    check(res, "hung: resume", {"rc 0": rc == 0, "ok": bool(doc and doc.get("ok")), "to ok": (doc or {}).get("to") == "ok"},
+          answer=doc or text[-300:])
+    ok, w = t.wait_settled(host, e0, a.settle)
+    check(res, f"hung: service ok, master {host} at epoch {e0}", {"settled": ok},
+          where={"epoch": w.get("epoch"), "state": w.get("state"),
+                 "replicas": [(r.get("host"), r.get("state")) for r in w.get("replicas") or []]})
+    if not a.no_load:
+        res.record("hung: load commits again", "PASS" if t.load_moves(120) else "FAIL")
 
 
 def case_failover(t, a, res):
@@ -266,7 +415,41 @@ def case_failover(t, a, res):
         return
     to = t.other(lost)
     e0 = t.service()["epoch"]
+    was_policy = None
+    if a.fence_mode:
+        was_policy = dict(t.policy().get("policy") or {})
+        t.set_policy(dict(was_policy, fence_mode=a.fence_mode))
+    try:
+        failover_body(t, a, res, lost, to, e0)
+    finally:
+        if was_policy is not None:
+            t.set_policy(was_policy)
+
+
+def failover_body(t, a, res, lost, to, e0):
+    before = None
+    if a.disable_table:
+        db0 = t.where()["master"]["db_id"]
+        before = t.disabled_tables(lost, db0)
+        t.set_disabled_tables(lost, db0, sorted(set(before) | {a.disable_table}))
+        # Two stats pushes (30 s each): RCM keeps the master's last list.
+        time.sleep(70)
+    try:
+        failover_steps(t, a, res, lost, to, e0)
+    finally:
+        if before is not None:
+            # Put the list back on whichever host is the master now.
+            try:
+                w = t.where()
+                t.set_disabled_tables(w["master"]["host"], w["master"]["db_id"], before)
+            except TbError as e:
+                res.record("failover: publication tables put back", "FAIL", note=str(e)[:300])
+
+
+def failover_steps(t, a, res, lost, to, e0):
     powered_off = False
+    doc = None
+    op_id = ""
     try:
         t.power(lost, "off")
         powered_off = True
@@ -286,12 +469,30 @@ def case_failover(t, a, res):
                                                       f"epoch {e0 + 1}": epoch == e0 + 1},
               seconds_since_power_off=round(time.time() - t0),
               error=(doc or {}).get("error", text[-300:] if rc else ""))
+        op_id = (doc or {}).get("operation_id", "")
+        if a.disable_table and status == "ok":
+            detail = steps.get("tables", {}).get("detail", "")
+            w = t.where()
+            now = t.disabled_tables(to, w["master"]["db_id"])
+            check(res, f"failover: {a.disable_table} stays out of the publication on {to}", {
+                "taken from the old master's last stats": "its last stats" in detail,
+                f"{a.disable_table} disabled on the new master": a.disable_table in now,
+            }, tables_step=detail, disabled_now=now)
         if not a.no_load:
             res.record("failover: load commits again", "PASS" if t.load_moves(120) else "FAIL")
     finally:
         if powered_off:
             t.power(lost, "on")
-    check(res, "failover: the old master is fenced at its first answer", {"fenced": t.wait_fenced(300)})
+    fenced = t.wait_fenced(300)
+    warns = ""
+    if op_id:
+        _, _, op = t.rcm("operations", "show", "-id", op_id)
+        warns = "\n".join((op or {}).get("warnings") or [])
+    conds = {"fenced": fenced, "fence in the operation's warnings": f"fenced at epoch {e0 + 1}" in warns}
+    if a.fence_mode == "shutdown":
+        conds["the database was shut down first"] = "database shut down" in warns
+    check(res, "failover: the old master is fenced at its first answer", conds,
+          fence=[x for x in warns.splitlines() if "fenced at epoch" in x][-1:])
     rejoin(t, a, res, "failover", to, e0 + 1)
 
 

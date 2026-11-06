@@ -1,0 +1,95 @@
+--- src/jrd/jrd.cpp.1878fix	2026-11-05 17:21:36.000000000 +0100
++++ src/jrd/jrd.cpp	2026-11-06 00:13:03.812458297 +0100
+@@ -4728,6 +4728,7 @@
+  *
+  **************************************/
+ 	jrd_tra* tra = NULL;
++	JTransaction* jt = NULL;
+ 
+ 	try
+ 	{
+@@ -4735,6 +4736,19 @@
+ 		check_database(tdbb);
+ 
+ 		start_transaction(tdbb, true, &tra, getHandle(), tpbLength, tpb);
++
++		// Make the interface while the attachment is locked: a forced shutdown
++		// purges the attachment as soon as the lock is free, and tra is gone.
++		jt = tra->getInterface(false);
++
++		if (jt)
++			tra->tra_flags &= ~TRA_own_interface;
++		else
++		{
++			jt = FB_NEW JTransaction(tra, getStable());
++			tra->setInterface(jt);
++			jt->addRef();
++		}
+ 	}
+ 	catch (const Exception& ex)
+ 	{
+@@ -4744,17 +4758,6 @@
+ 
+ 	successful_completion(user_status);
+ 
+-	JTransaction* jt = tra->getInterface(false);
+-
+-	if (jt)
+-		tra->tra_flags &= ~TRA_own_interface;
+-	else
+-	{
+-		jt = FB_NEW JTransaction(tra, getStable());
+-		tra->setInterface(jt);
+-		jt->addRef();
+-	}
+-
+ 	return jt;
+ }
+ 
+--- src/jrd/Mapping.cpp.1878fix	2026-11-05 17:21:36.000000000 +0100
++++ src/jrd/Mapping.cpp	2026-11-06 00:13:03.808458321 +0100
+@@ -1323,7 +1323,11 @@
+ 	// Std safe check for data presence in cache
+ 	if (cache->dataFlag)
+ 		return false;
+-	MutexLockGuard g2(cache->populateMutex, FB_FUNCTION);
++	// Own reference while populateMutex is locked: when clearCache removed the
++	// cache from the tree meanwhile, cache = nullptr below releases the last
++	// one, and the destructor must not destroy a locked mutex.
++	RefPtr<Cache> keep(cache);
++	MutexLockGuard g2(keep->populateMutex, FB_FUNCTION);
+ 	if (cache->dataFlag)
+ 		return false;
+ 
+--- src/jrd/trace/TraceManager.cpp.1878fix	2026-11-05 17:21:36.000000000 +0100
++++ src/jrd/trace/TraceManager.cpp	2026-11-05 23:30:45.883941927 +0100
+@@ -336,24 +336,11 @@
+ 			}
+ 			else if (filename)
+ 			{
+-				if (session.ses_auth.hasData())
+-				{
+-					Mapping mapping(Mapping::MAP_NO_FLAGS, callback);
+-					mapping.needSystemPrivileges(priv);
+-					mapping.setAuthBlock(session.ses_auth);
+-					mapping.setSqlRole(session.ses_role);
+-
+-					RefPtr<const Config> config;
+-					PathName org_filename(filename), expanded_name;
+-					if (! expandDatabaseName(org_filename, expanded_name, &config))
+-						expanded_name = filename;
+-
+-					mapping.setSecurityDbAlias(config->getSecurityDatabase(), expanded_name.c_str());
+-					if (!failedAttach)
+-						mapping.setDb(filename, expanded_name.c_str(), nullptr);
+-
+-					mapResult = mapping.mapUser(s_user, t_role);
+-				}
++				// Failed attachment: do not map the session user. A mapping attachment
++				// to a database in full shutdown is rejected too, and its unwind may
++				// shut the database down and wait for the garbage collector while this
++				// thread holds the mapping cache locks the collector needs (deadlock).
++				// The check below uses the session user name.
+ 			}
+ 			else
+ 			{
