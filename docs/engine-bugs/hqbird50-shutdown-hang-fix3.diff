@@ -1,0 +1,48 @@
+--- src/jrd/jrd.cpp.1878fix
++++ src/jrd/jrd.cpp
+@@ -4735,27 +4735,30 @@
+ 		check_database(tdbb);
+ 
+ 		start_transaction(tdbb, true, &tra, getHandle(), tpbLength, tpb);
++
++		// Stay inside the try block, while the attachment is locked: a forced
++		// shutdown purges the attachment as soon as the lock is free, and tra
++		// is gone then.
++		successful_completion(user_status);
++
++		JTransaction* jt = tra->getInterface(false);
++
++		if (jt)
++			tra->tra_flags &= ~TRA_own_interface;
++		else
++		{
++			jt = FB_NEW JTransaction(tra, getStable());
++			tra->setInterface(jt);
++			jt->addRef();
++		}
++
++		return jt;
+ 	}
+ 	catch (const Exception& ex)
+ 	{
+ 		ex.stuffException(user_status);
+ 		return NULL;
+ 	}
+-
+-	successful_completion(user_status);
+-
+-	JTransaction* jt = tra->getInterface(false);
+-
+-	if (jt)
+-		tra->tra_flags &= ~TRA_own_interface;
+-	else
+-	{
+-		jt = FB_NEW JTransaction(tra, getStable());
+-		tra->setInterface(jt);
+-		jt->addRef();
+-	}
+-
+-	return jt;
+ }
+ 
+ 

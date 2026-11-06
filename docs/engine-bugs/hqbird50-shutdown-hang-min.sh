@@ -53,6 +53,7 @@ INTAKE=${INTAKE:-open}        # closed: no new attachments from the shutdown on
 FBCONF=${FBCONF:-}            # more firebird.conf lines, e.g. 'TraceAll = true'
 TIMEOUT=${TIMEOUT:-30}        # s for one tool; longer is a hang
 KEEP=${KEEP:-0}               # 1: keep the server and its files
+CPUS=${CPUS:-}                # CPU list for the server (taskset -c), e.g. 0
 
 set -u
 [ $# -eq 3 ] || { echo "usage: $0 FB_ROOT WORK_DIR ITERATIONS" >&2; exit 64; }
@@ -177,11 +178,11 @@ while IFS= read -r line; do # an FBCONF line replaces the same key
 done <<< "$FBCONF"
 sed -i -E "s#^([[:space:]]*security\.db[[:space:]]*=).*#\1 $FB/security5.fdb#" "$FB/databases.conf"
 
-"$FB/bin/firebird" >> "$RUN/server.out" 2>&1 < /dev/null &
+${CPUS:+taskset -c "$CPUS"} "$FB/bin/firebird" >> "$RUN/server.out" 2>&1 < /dev/null &
 PID=$!
 for ((i = 0; i < 30; i++)); do (exec 3<> "/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 1; done
 log "start: $("$FB/bin/gstat" -z 2>&1 | grep -io 'LI-V.*'), server pid $PID, $ITER iterations"
-log "settings: WRITERS=$WRITERS CONNECTS=$CONNECTS ONLINE_S=$ONLINE_S BURST_S=$BURST_S SHUT_S=$SHUT_S SHUT_MODE=$SHUT_MODE TRACE=$TRACE INTAKE=$INTAKE TIMEOUT=$TIMEOUT${FBCONF:+ FBCONF='$FBCONF'}"
+log "settings: WRITERS=$WRITERS CONNECTS=$CONNECTS ONLINE_S=$ONLINE_S BURST_S=$BURST_S SHUT_S=$SHUT_S SHUT_MODE=$SHUT_MODE TRACE=$TRACE INTAKE=$INTAKE TIMEOUT=$TIMEOUT${FBCONF:+ FBCONF='$FBCONF'}${CPUS:+ CPUS=$CPUS}"
 
 # --- databases, trace session, load
 for f in test probe; do

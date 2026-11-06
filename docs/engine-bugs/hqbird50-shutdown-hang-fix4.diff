@@ -1,0 +1,75 @@
+--- src/jrd/jrd.cpp.1878fix
++++ src/jrd/jrd.cpp
+@@ -8091,6 +8091,18 @@
+ 	// Since that moment dbb becomes not reusable
+ 	dbb->dbb_init_fini->destroy();
+ 
++	// System attachments (garbage collector, cache writer, workers) are stopped
++	// below, and the garbage collector commits its transaction on exit. They
++	// must take no new trace sessions now: the mapping for a new session can
++	// wait for a lock (populateMutex of the mapping cache, spCache) held by
++	// this thread, which waits for them to finish.
++	{ // scope
++		SyncLockGuard sysGuard(&dbb->dbb_sys_attach, SYNC_SHARED, FB_FUNCTION);
++
++		for (Jrd::Attachment* att = dbb->dbb_sys_attachments; att; att = att->att_next)
++			att->att_trace_manager->stopNewSessions();
++	}
++
+ 	fb_assert(!dbb->locked());
+ 
+ 	WorkerAttachment::shutdownDbb(dbb);
+--- src/jrd/trace/TraceManager.h.1878fix
++++ src/jrd/trace/TraceManager.h
+@@ -30,6 +30,7 @@
+ #define JRD_TRACEMANAGER_H
+ 
+ #include <time.h>
++#include <atomic>
+ #include "../../jrd/ntrace.h"
+ #include "../../common/classes/array.h"
+ #include "../../common/classes/fb_string.h"
+@@ -152,6 +153,15 @@
+ 		active = true;
+ 	}
+ 
++	// The attachment goes away (its database closes): from now on
++	// update_sessions() adds no new trace sessions. A new session makes it map
++	// the session user, and the mapping can wait for a lock held by the thread
++	// that waits for this attachment to finish.
++	void stopNewSessions()
++	{
++		newSessionsStopped = true;
++	}
++
+ 	// helps avoid early use
+ 	bool isActive()
+ 	{
+@@ -275,6 +285,7 @@
+ 
+ 	ULONG changeNumber;
+ 	bool active, failedAttach;
++	std::atomic<bool> newSessionsStopped;
+ };
+ 
+ }
+--- src/jrd/trace/TraceManager.cpp.1878fix
++++ src/jrd/trace/TraceManager.cpp
+@@ -128,6 +128,7 @@
+ 	getStorage();
+ 	load_plugins();
+ 	changeNumber = 0;
++	newSessionsStopped = false;
+ }
+ 
+ void TraceManager::load_plugins()
+@@ -203,7 +204,8 @@
+ 
+ 		// don't attach going attachment to the new trace sessions, it allows
+ 		// to avoid problems later - when mapping uses this going attachment
+-		const bool noNewSessions = attachment && (attachment->att_purge_tid);
++		const bool noNewSessions = newSessionsStopped ||
++			(attachment && (attachment->att_purge_tid));
+ 
+ 		StorageGuard guard(storage);
+ 		ConfigStorage::Accessor acc(&guard);

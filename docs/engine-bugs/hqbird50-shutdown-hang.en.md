@@ -216,6 +216,41 @@ Proposal 2 is not in the build: fix 1 alone breaks the cycle.
 | Minimal script (`hqbird50-shutdown-hang-min.sh`, a user trace session) | original engine: hung in 11 of 11 runs; fix 1 only: no hang in 192 iterations, but aborts and the SIGSEGV; fix15t: **10 runs × 40 iterations, no hang, no abort, no crash** |
 | The stand (ubuntu-1..3, fbagent trace tasks on again) | **40 switchovers under load: 40 of 40, 121 of 121 cases, 41-66 s each (median 50.5 s), no hang, no crash** |
 
+## Second tested fix: fix 4, hvlad's variant (2026-11-06)
+
+hvlad's idea: the garbage collector must not map users at its last commit.
+`hqbird50-shutdown-hang-fix4.diff` (`jrd.cpp`, `TraceManager.h/.cpp`):
+right after `dbb_init_fini->destroy()` in `JRD_shutdown_database()`, it
+calls `att_trace_manager->stopNewSessions()` for every system attachment
+(GC, cache writer, workers). Then `update_sessions()` adds no new trace
+sessions for them, as `noNewSessions` already does for `att_purge_tid`.
+Failed attachments are still traced. It is set before `VIO_fini()`, so it
+also covers `TRA_start` in the GC.
+
+The crash fix for `startTransaction` alone is
+`hqbird50-shutdown-hang-fix3.diff` (AlexPeshkoff's variant: everything
+after the `catch` moves into the `try`).
+
+Results (minimal script, 40 iterations per run; Windows on 1 core):
+
+| Build | Linux | Windows |
+|---|---|---|
+| no fix | hangs in iteration 1-2 | crash (freed `JTransaction`) in 4 of 5 runs |
+| fix3 only | hangs in iteration 2 | 3 runs pass; run 4: crash of the GC after the 10 s wait (below) |
+| fix3 + fix4 | **15 runs, no hang, no abort** (10 with default settings, 5 on 1 CPU) | **4 runs, no hang, no crash** |
+
+**Windows has no hang, because of a 10 s wait.** On Windows,
+`Thread::waitForCompletion()` (`common/ThreadStart.cpp:375`) waits only
+10 s (`WaitForSingleObject(m_handle, 10000)`); Linux uses `pthread_join()`.
+So `VIO_fini()` gives up on the GC that waits for `populateMutex`,
+`JRD_shutdown_database()` goes on and deletes the `Database` with all its
+pools, including the GC attachment. When the GC gets the mutex, it uses
+freed memory: crash in `JAttachment::startTransaction` →
+`Attachment::setupIdleTimer`, called from `Mapping::Cache::populate` in
+the GC's last `TRA_commit`. The same 10 s limit can free a `Database`
+under any GC that needs more than 10 s at close (from the code, not
+tested). Details: `hqbird50-shutdown-hang-repro.ru.md`.
+
 ## Hang 2: no stacks
 
 The host was powered off before the stacks were taken. After the restart
