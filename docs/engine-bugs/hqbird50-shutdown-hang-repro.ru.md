@@ -162,8 +162,14 @@
      группе процессов.
 2. Пауза `ONLINE_S` с.
 3. Новая сессия трассировки `repro-N` (`fbtracemgr -start` в фоне, конфиг
-   `database { enabled = true; log_connections = true }`). Сессия прошлой
-   итерации останавливается (`fbtracemgr -stop -id`). Пауза 1 с.
+   `database { enabled = true; log_connections = true }`). Раз в 1 с
+   скрипт проверяет `fbtracemgr -list`, пока там не появится новая сессия,
+   но не дольше `TRACE_WAIT` с; обычно она видна при первой проверке.
+   Нет сессии — ошибка (код 3); если `fbtracemgr -start` ещё работает,
+   скрипт сначала сохраняет стеки и core в `WORK_DIR/trace-<время UTC>/`.
+   `-list` без ответа за `TIMEOUT` с — зависание. Сессия прошлой итерации
+   останавливается (`fbtracemgr -stop -id`); если её нет в `-list` или
+   `-stop` не ответил `stopped` — ошибка (код 3).
 4. Проверка: число транзакций пользователя `Garbage Collector` в
    `MON$TRANSACTIONS` (в логе: `garbage collector transactions: 1`).
    При `INTAKE=closed` здесь прекращаются новые подключения (пауза 1 с).
@@ -205,6 +211,7 @@
 | `INTAKE` | `open` | `closed` — за 1 с до shutdown новые подключения прекращаются (как закрытый HAProxy), открытые остаются до shutdown |
 | `FBCONF` | пусто | строки для `firebird.conf` копии, например `TraceAll = true` |
 | `TIMEOUT` | 30 | с на одну утилиту; дольше — зависание |
+| `TRACE_WAIT` | 10 | с, за которые новая сессия трассировки должна появиться в `fbtracemgr -list` (шаг 3) |
 | `KEEP` | 0 | 1 — не останавливать сервер и не удалять файлы |
 | `CPUS` | пусто | список CPU для сервера (`taskset -c`), например `0` — 1 CPU |
 

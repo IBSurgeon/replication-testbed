@@ -15,8 +15,9 @@
 #   - hqbird50-shutdown-hang-connects.sh (next to this script) attaches
 #     again and again with CONNECTS isql processes.
 #
-# One iteration: start the load, ONLINE_S s, a new trace session (the one of
-# the previous iteration is stopped), 1 s, gfix -shut full -force 0,
+# One iteration: start the load, ONLINE_S s, a new trace session (at least
+# 1 s, until fbtracemgr -list shows it; the one of the previous iteration is
+# stopped), gfix -shut full -force 0,
 # BURST_S s of rejected attachments, stop the load, SHUT_S s of quiet, a
 # probe attachment to probe.fdb, gfix -online normal.
 #
@@ -27,7 +28,9 @@
 #
 # In the deadlock no new attachment gets an answer, so a tool runs into
 # TIMEOUT. Then the script saves gdb stacks, a core, gstat -h and
-# firebird.log into WORK_DIR/hang-<time>/ and stops.
+# firebird.log into WORK_DIR/hang-<time>/ and stops. If fbtracemgr -list
+# does not show a new trace session in TRACE_WAIT s while fbtracemgr -start
+# still runs, the same goes into WORK_DIR/trace-<time>/ (exit 3).
 #
 # ISC_PASSWORD (ISC_USER, default SYSDBA) must be valid in
 # FB_ROOT/security5.fdb, which is copied. Needs gdb; run as root in a test
@@ -52,12 +55,14 @@ TRACE=${TRACE:-1}             # 1: a new session per iteration; stop, once, 0
 INTAKE=${INTAKE:-open}        # closed: no new attachments from the shutdown on
 FBCONF=${FBCONF:-}            # more firebird.conf lines, e.g. 'TraceAll = true'
 TIMEOUT=${TIMEOUT:-30}        # s for one tool; longer is a hang
+TRACE_WAIT=${TRACE_WAIT:-10}  # s until fbtracemgr -list must show a new session
 KEEP=${KEEP:-0}               # 1: keep the server and its files
 CPUS=${CPUS:-}                # CPU list for the server (taskset -c), e.g. 0
 
 set -u
 [ $# -eq 3 ] || { echo "usage: $0 FB_ROOT WORK_DIR ITERATIONS" >&2; exit 64; }
 [ -n "${ISC_PASSWORD:-}" ] || { echo "set ISC_PASSWORD" >&2; exit 64; }
+case $TRACE_WAIT in '' | *[!0-9]*) echo "TRACE_WAIT: whole seconds" >&2; exit 64 ;; esac
 command -v gdb > /dev/null || { echo "gdb is needed for the stacks" >&2; exit 64; }
 FBROOT=$(cd "$1" && pwd) || exit 64
 mkdir -p "$2" && WORK=$(cd "$2" && pwd) || exit 64
@@ -67,7 +72,7 @@ RUN=$WORK/run
 FB=$RUN/fb
 DB=localhost/$PORT:$RUN/test.fdb
 LOG=$WORK/repro.log
-IT=0 PID= CPID= HUNG=
+IT=0 PID= CPID= HUNG= OUT= RC=0
 export ISC_USER=${ISC_USER:-SYSDBA} ISC_PASSWORD FIREBIRD=$FB FIREBIRD_LOCK=$RUN/lock FIREBIRD_TMP=$RUN/tmp
 
 log() { printf '%s it=%s %s\n' "$(date -u +%T)" "$IT" "$*" | tee -a "$LOG"; }
@@ -88,15 +93,21 @@ run() {
 
 hang() {
 	HUNG=$WORK/hang-$(date -u +%Y%m%d-%H%M%S)
-	mkdir -p "$HUNG"
 	log "HANG in iteration $IT: '$1' got no answer in $TIMEOUT s; saving $HUNG"
+	save_state
+	exit 2
+}
+
+# save_state: versions, gstat -h, maps, gdb stacks and a core of the server
+# into the directory HUNG
+save_state() {
+	mkdir -p "$HUNG"
 	{ "$FB/bin/gstat" -z; md5sum "$FB/bin/firebird" "$FB/plugins/libEngine13.so"; uname -sr; } > "$HUNG/version.txt" 2>&1
 	timeout 10 "$FB/bin/gstat" -h "$RUN/test.fdb" > "$HUNG/gstat-h.txt" 2>&1
 	cp "/proc/$PID/maps" "$HUNG/maps.txt"
 	DEBUGINFOD_URLS= timeout 600 gdb -p "$PID" -batch -ex 'set pagination off' -ex 'thread apply all bt' \
 		-ex "gcore $HUNG/core" > "$HUNG/stacks.txt" 2>&1
 	log "  $(grep -c '^Thread ' "$HUNG/stacks.txt") thread stacks and a core saved"
-	exit 2
 }
 
 stop_connects() { [ -n "$CPID" ] && kill -- -"$CPID" 2>/dev/null; CPID=; }
@@ -124,20 +135,66 @@ cleanup() {
 
 tracemgr() { timeout -k 5 "$TIMEOUT" "$FB/bin/fbtracemgr" -se "localhost/$PORT:service_mgr" "$@"; }
 
-# trace_start <name>: start a session (fbtracemgr runs in the background)
-# and check its flags.
-trace_start() {
-	local flags
-	"$FB/bin/fbtracemgr" -se "localhost/$PORT:service_mgr" -start -name "$1" -config "$RUN/trace.conf" > /dev/null 2>&1 &
-	sleep 1
-	flags=$(tracemgr -list 2>&1 | awk -v n="$1" '$1 == "name:" {s = ($2 == n)} s && $1 == "flags:"' | cut -c1-60)
-	[ "$IT" -le 1 ] && log "  trace session $1:${flags:- missing}"
-	[ -n "$flags" ] || { log "FAILED: no trace session $1"; exit 3; }
+# tracemgr_out <what> <args>: run tracemgr, output in OUT, rc in RC; no
+# answer in TIMEOUT s is a hang
+tracemgr_out() {
+	OUT=$(tracemgr "${@:2}" 2>&1)
+	RC=$?
+	case $RC in 124 | 137) hang "fbtracemgr ${*:2} ($1)" ;; esac
 }
 
-trace_stop() { # trace_stop <name>
-	tracemgr -stop -id "$(tracemgr -list 2>&1 | awk -v n="$1" '/Session ID/ {id = $3} $1 == "name:" && $2 == n {print id}')" > /dev/null 2>&1
+# oneline <text>: newlines and tabs as spaces, at most 200 characters
+oneline() { printf '%s' "$1" | tr -s '\n\t' '  ' | cut -c1-200; }
+
+# trace_start <name>: start a session (fbtracemgr runs in the background)
+# and check -list once a second until it shows the session, up to
+# TRACE_WAIT s: on 1 CPU under the load the server can need more than 1 s.
+trace_start() {
+	local tpid flags n=0 t0=$SECONDS
+	"$FB/bin/fbtracemgr" -se "localhost/$PORT:service_mgr" -start -name "$1" -config "$RUN/trace.conf" \
+		> "$RUN/trace-$1.out" 2> "$RUN/trace-$1.err" &
+	tpid=$!
+	while :; do
+		sleep 1
+		n=$((n + 1))
+		tracemgr_out "trace session $1" -list
+		flags=$(printf '%s\n' "$OUT" | awk -v n="$1" '$1 == "name:" {s = ($2 == n)} s && $1 == "flags:"' | cut -c1-60)
+		[ -n "$flags" ] && break
+		kill -0 "$tpid" 2>/dev/null && [ $((SECONDS - t0)) -lt "$TRACE_WAIT" ] && continue
+		kill -0 "$PID" 2>/dev/null || log "the server process is gone"
+		log "FAILED: no trace session $1 after $n checks, $((SECONDS - t0)) s; -list rc=$RC | $(oneline "$OUT")"
+		log "  fbtracemgr -start: $(oneline "$(head -c 300 "$RUN/trace-$1.out"; head -c 300 "$RUN/trace-$1.err")")"
+		if kill -0 "$tpid" 2>/dev/null; then
+			HUNG=$WORK/trace-$(date -u +%Y%m%d-%H%M%S)
+			log "  fbtracemgr -start still runs; saving $HUNG"
+			save_state
+		else
+			log "  fbtracemgr -start ended"
+		fi
+		exit 3
+	done
+	[ "$IT" -le 1 ] && log "  trace session $1:$flags"
+	if [ "$n" -gt 1 ] || [ $((SECONDS - t0)) -gt 2 ]; then
+		log "  trace session $1 listed at check $n, after $((SECONDS - t0)) s"
+	fi
+	return 0
+}
+
+# trace_stop <name>: stop a session that trace_start saw; it must still be
+# in -list and stop
+trace_stop() {
+	local id
+	tracemgr_out "to stop trace session $1" -list
+	id=$(printf '%s\n' "$OUT" | awk -v n="$1" '/Session ID/ {id = $3} $1 == "name:" && $2 == n {print id}')
+	[ -n "$id" ] || { log "FAILED: trace session $1 to stop is not in -list; rc=$RC | $(oneline "$OUT")"; exit 3; }
+	tracemgr_out "trace session $1" -stop -id "$id"
+	case $OUT in
+	*" stopped"*) ;;
+	*) log "FAILED: fbtracemgr -stop -id $id (trace session $1) rc=$RC | $(oneline "$OUT")"; exit 3 ;;
+	esac
+	rm -f "$RUN/trace-$1.out" "$RUN/trace-$1.err"
 	[ "$IT" -le 2 ] && log "  trace session $1 stopped; sessions: $(tracemgr -list 2>&1 | grep -c 'Session ID')"
+	return 0
 }
 
 # writer <n> <file>: runs while <file> exists; reconnects after an error
@@ -182,7 +239,7 @@ ${CPUS:+taskset -c "$CPUS"} "$FB/bin/firebird" >> "$RUN/server.out" 2>&1 < /dev/
 PID=$!
 for ((i = 0; i < 30; i++)); do (exec 3<> "/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && break; sleep 1; done
 log "start: $("$FB/bin/gstat" -z 2>&1 | grep -io 'LI-V.*'), server pid $PID, $ITER iterations"
-log "settings: WRITERS=$WRITERS CONNECTS=$CONNECTS ONLINE_S=$ONLINE_S BURST_S=$BURST_S SHUT_S=$SHUT_S SHUT_MODE=$SHUT_MODE TRACE=$TRACE INTAKE=$INTAKE TIMEOUT=$TIMEOUT${FBCONF:+ FBCONF='$FBCONF'}${CPUS:+ CPUS=$CPUS}"
+log "settings: WRITERS=$WRITERS CONNECTS=$CONNECTS ONLINE_S=$ONLINE_S BURST_S=$BURST_S SHUT_S=$SHUT_S SHUT_MODE=$SHUT_MODE TRACE=$TRACE INTAKE=$INTAKE TIMEOUT=$TIMEOUT TRACE_WAIT=$TRACE_WAIT${FBCONF:+ FBCONF='$FBCONF'}${CPUS:+ CPUS=$CPUS}"
 
 # --- databases, trace session, load
 for f in test probe; do
