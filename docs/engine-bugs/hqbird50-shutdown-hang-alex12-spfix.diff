@@ -1,0 +1,25 @@
+diff --git a/src/jrd/Mapping.cpp b/src/jrd/Mapping.cpp
+--- a/src/jrd/Mapping.cpp
++++ b/src/jrd/Mapping.cpp
+@@ -1639,13 +1639,17 @@
+ 			if (!spCache().getPrivileges(mainDb, name, sqlRole, trustedRole, *systemPrivileges))
+ 			{
+ 				sync.unlock();
+-				sync.lock(SYNC_EXCLUSIVE);
+ 
+-				if (!spCache().getPrivileges(mainDb, name, sqlRole, trustedRole, *systemPrivileges))
++				// Attach with no lock: a rejected attachment can be the last one and
++				// close the database, which waits for the garbage collector, and the
++				// collector can need this lock in its last commit.
++				mainHandle.attach(mainAlias, cryptCallback);
++
++				if (mainHandle)
+ 				{
+-					mainHandle.attach(mainAlias, cryptCallback);
++					sync.lock(SYNC_EXCLUSIVE);
+ 
+-					if (mainHandle)
++					if (!spCache().getPrivileges(mainDb, name, sqlRole, trustedRole, *systemPrivileges))
+ 					{
+ 						spCache().populate(mainDb, mainHandle, name, sqlRole, trustedRole);
+ 						spCache().getPrivileges(mainDb, name, sqlRole, trustedRole, *systemPrivileges);

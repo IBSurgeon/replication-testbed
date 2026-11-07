@@ -261,7 +261,10 @@ rejected attachment holds it in `SYNC_EXCLUSIVE` during
 `mainHandle.attach()` (`Mapping.cpp:1646`), and the GC waits for it in
 `SYNC_SHARED` (`Mapping.cpp:1634`). On Windows (1 core) it
 crashed in 4 of 4 runs: bug 3 (freed `JTransaction`), which the patch does
-not touch. Report (in Russian):
+not touch. With the same change for the `spCache` lock in `mapUser()`
+(`hqbird50-shutdown-hang-alex12-spfix.diff`) and fix3: Linux 15 × 40
+iterations and Windows 4 × 40 cycles (1 core) with no hang and no crash;
+PR IBSurgeon/hqbird#14. Report (in Russian):
 `hqbird50-shutdown-hang-alex12.ru.md`.
 
 ## Hang 2: no stacks

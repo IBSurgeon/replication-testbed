@@ -1,4 +1,4 @@
-# Firebird 5.0.5 HQbird: проверка патча 12.patch (AlexPeshkoff), 2026-11-06
+# Firebird 5.0.5 HQbird: проверка патча 12.patch (AlexPeshkoff), 2026-11-06/07
 
 Отчёт для IBSurgeon/hqbird#12. Общее описание цикла, скрипты и другие
 сборки — в [hqbird50-shutdown-hang-repro.ru.md](hqbird50-shutdown-hang-repro.ru.md).
@@ -20,6 +20,11 @@
   ошибку), но не цикл в целом. Нужно то же изменение для `Sync` кэша
   `spCache` в `Mapping::mapUser()`, или предложение 4
   (`hqbird50-shutdown-hang-fix4.diff`), или оба.
+- **2026-11-07: `12.patch` + то же изменение для `spCache` + fix3** —
+  **нет зависаний и падений**: Linux 15 × 40 итераций (10 по умолчанию,
+  5 на 1 CPU), Windows 4 × 40 циклов на 1 ядре. Раздел «Сборка 12.patch +
+  `spCache` + fix3», PR
+  [IBSurgeon/hqbird#14](https://github.com/IBSurgeon/hqbird/pull/14).
 
 ## Патч
 
@@ -215,6 +220,58 @@ firebird!process_packet
 Полные дампы (`crash-alex12-N.dmp`, 210-260 МБ) и вывод `cdb` остаются на
 тестовом хосте.
 
+## Сборка 12.patch + `spCache` + fix3 (2026-11-07)
+
+Три изменения, без предложения 4:
+
+1. `12.patch` (AlexPeshkoff): `ensureCachePresence()` подключается без
+   `populateMutex`.
+2. [hqbird50-shutdown-hang-alex12-spfix.diff](hqbird50-shutdown-hang-alex12-spfix.diff)
+   (поверх `12.patch`): то же для `spCache` в `Mapping::mapUser()`.
+   Подключение к основной базе — без блокировки; `SYNC_EXCLUSIVE` берётся
+   только чтобы ещё раз проверить кэш и заполнить его:
+
+   ```cpp
+   if (!spCache().getPrivileges(mainDb, name, sqlRole, trustedRole, *systemPrivileges))
+   {
+       sync.unlock();
+
+       // Attach with no lock: a rejected attachment can be the last one and
+       // close the database, which waits for the garbage collector, and the
+       // collector can need this lock in its last commit.
+       mainHandle.attach(mainAlias, cryptCallback);
+
+       if (mainHandle)
+       {
+           sync.lock(SYNC_EXCLUSIVE);
+
+           if (!spCache().getPrivileges(mainDb, name, sqlRole, trustedRole, *systemPrivileges))
+           {
+               spCache().populate(mainDb, mainHandle, name, sqlRole, trustedRole);
+               spCache().getPrivileges(mainDb, name, sqlRole, trustedRole, *systemPrivileges);
+           }
+       }
+   }
+   ```
+
+3. [hqbird50-shutdown-hang-fix3.diff](hqbird50-shutdown-hang-fix3.diff):
+   третья ошибка, `JAttachment::startTransaction()` (вариант AlexPeshkoff).
+
+| Система | Файл | md5 | Прочее |
+|---|---|---|---|
+| Linux | `libEngine13.so` | `2c3ca3e0d487ff5f5f27d01dc1959f7c` | build-id `c7ad448e22751259b72bfd15746468195f8c0412`; отладочный файл md5 `d6fc1839fb2ddd816fd74ec7de20c9d0` |
+| Windows | `Engine13.dll` | `65eae3235857410ccd29853aac3ab52c` | Visual Studio 2026 (toolset 14.50), Release x64 |
+
+Тот же план, что для `12.patch` и fix34 (раздел «Как проверяли»):
+
+| Где | Объём | Результат |
+|---|---|---|
+| Linux, по умолчанию | 10 × 40 итераций | **нет зависаний**: 10 запусков по 40 итераций, abort нет |
+| Linux, `CPUS=0` (1 CPU) | 5 × 40 итераций | **нет зависаний**: 5 запусков по 40 итераций, abort нет |
+| Windows, 1 ядро | 4 × 40 циклов | **нет зависаний и падений**: 640 шагов (`gfix -shut full`, проба, `gfix -online normal`, проверка GC), все с rc=0; шагов дольше 9 с нет, то есть нет и 10-секундного ожидания GC |
+
+Все три изменения для ветки `v5.0-release` — в PR [IBSurgeon/hqbird#14](https://github.com/IBSurgeon/hqbird/pull/14).
+
 ## Сравнение сборок (тот же скрипт и объём)
 
 | Сборка | Linux, по умолчанию | Linux, 1 CPU | Windows, 1 ядро |
@@ -222,51 +279,29 @@ firebird!process_packet
 | без исправлений (1878) | зависание в итерации 1-2 (13 из 13) | — | падение в 4 запусках из 5 (освобождённый `JTransaction`) |
 | fix3 (третья ошибка) | зависание в итерации 2 | 5 × 40 без зависаний (`TraceAll = true`) | 3 запуска без падений, 1 падение GC после 10 с ожидания |
 | fix34 (fix3 + предложение 4) | 10 × 40 без зависаний | 5 × 40 без зависаний | 4 × 40 без зависаний и падений |
-| **12.patch** | **зависание в итерации 1** | **зависание в итерации 1** | **падение в 4 из 4** (третья ошибка) |
+| 12.patch | зависание в итерации 1 | зависание в итерации 1 | падение в 4 из 4 (третья ошибка) |
+| **12.patch + `spCache` + fix3** | **10 × 40 без зависаний** | **5 × 40 без зависаний** | **4 × 40 без зависаний и падений** |
 
 ## Что предлагаем
 
-1. **То же изменение для `spCache` в `Mapping::mapUser()`.** Не держать
-   `Sync` в режиме `SYNC_EXCLUSIVE` во время `mainHandle.attach()`:
-   подключиться до захвата, под блокировкой только проверить кэш ещё раз и
-   заполнить его. Например (не проверено):
-
-   ```cpp
-   if (!spCache().getPrivileges(mainDb, name, sqlRole, trustedRole, *systemPrivileges))
-   {
-       sync.unlock();
-
-       // no lock while attaching: the attachment can wait for the GC
-       mainHandle.attach(mainAlias, cryptCallback);
-
-       sync.lock(SYNC_EXCLUSIVE);
-       if (mainHandle &&
-           !spCache().getPrivileges(mainDb, name, sqlRole, trustedRole, *systemPrivileges))
-       {
-           spCache().populate(mainDb, mainHandle, name, sqlRole, trustedRole);
-           spCache().getPrivileges(mainDb, name, sqlRole, trustedRole, *systemPrivileges);
-       }
-   }
-   ```
-
-2. **Предложение 4 (вариант hvlad) вместе с патчем.** Уходящее системное
-   подключение не берёт новые сессии трассировки, и GC при выходе не идёт в
-   отображение совсем. Это закрывает оба варианта цикла независимо от
-   блокировок в `Mapping.cpp` (проверено: fix34, 15 + 4 запуска по 40
-   итераций). AlexPeshkoff в #12 тоже назвал это правильной доработкой.
+1. **`12.patch` + изменение для `spCache` + fix3** — проверенный набор
+   (раздел выше). Все три изменения — в [IBSurgeon/hqbird#14](https://github.com/IBSurgeon/hqbird/pull/14).
+2. **Предложение 4 (вариант hvlad)** — по желанию, как дополнительная
+   защита. Уходящее системное подключение не берёт новые сессии
+   трассировки, и GC при выходе не идёт в отображение совсем. Отдельно от
+   `12.patch` проверено (fix34: 15 + 4 запуска по 40 итераций).
+   AlexPeshkoff в #12 тоже назвал это правильной доработкой («мало ли какой
+   ещё deadlock вылезет»). Вместе с `12.patch` не проверяли.
 3. **Исправление третьей ошибки** (`hqbird50-shutdown-hang-fix3.diff`)
    нужно в любом случае: без него на Windows сервер падает в
    `YTransaction::validate()` на освобождённом `JTransaction`.
-
-Сборку «12.patch + изменение для `spCache` + fix3» (и, если нужно, +
-fix4) можем проверить тем же планом. Без fix3 Windows падает на третьей
-ошибке раньше, чем можно оценить цикл.
 
 ## Файлы
 
 | Файл | Что это |
 |---|---|
 | [hqbird50-shutdown-hang-alex12.patch](hqbird50-shutdown-hang-alex12.patch) | патч AlexPeshkoff, как в #12 |
+| [hqbird50-shutdown-hang-alex12-spfix.diff](hqbird50-shutdown-hang-alex12-spfix.diff) | изменение для `spCache`, поверх `12.patch` |
 | [hqbird50-shutdown-hang-min.sh](hqbird50-shutdown-hang-min.sh) | скрипт Linux |
 | [hqbird50-shutdown-hang-win/](hqbird50-shutdown-hang-win/) | скрипты Windows |
 | [hqbird50-shutdown-hang-fix3.diff](hqbird50-shutdown-hang-fix3.diff), [hqbird50-shutdown-hang-fix4.diff](hqbird50-shutdown-hang-fix4.diff) | сборки fix3 и fix34 для сравнения |

@@ -574,3 +574,7 @@ Linux — контейнер LXD, 2 vCPU, `hqbird50-shutdown-hang-min.sh`, 40 и
 2 — цикл замыкается на `Sync` кэша `spCache` в `Mapping::mapUser()`
 (второй вариант цикла). На Windows (1 ядро)
 падение в 4 запусках из 4 — третья ошибка, её патч не трогает.
+`12.patch` + то же изменение для `spCache`
+([hqbird50-shutdown-hang-alex12-spfix.diff](hqbird50-shutdown-hang-alex12-spfix.diff))
++ fix3: Linux 15 × 40 итераций и Windows 4 × 40 циклов (1 ядро) без
+зависаний и падений; PR [IBSurgeon/hqbird#14](https://github.com/IBSurgeon/hqbird/pull/14).
