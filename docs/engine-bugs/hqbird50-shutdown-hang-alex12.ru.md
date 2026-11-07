@@ -272,6 +272,72 @@ firebird!process_packet
 
 Все три изменения для ветки `v5.0-release` — в PR [IBSurgeon/hqbird#14](https://github.com/IBSurgeon/hqbird/pull/14).
 
+## После ревью hvlad (2026-11-07)
+
+Замечания hvlad к fix3 в PR #14: `successful_completion()` везде последний
+вызов и стоит вне `try`/`catch`; комментарий не нужен. Новый вид
+`JAttachment::startTransaction()` (коммит `c8c57bbd31`): `JTransaction`
+по-прежнему создаётся внутри `try`, пока подключение заблокировано;
+`successful_completion()` — после `catch`; комментария нет.
+
+```diff
+ 	jrd_tra* tra = NULL;
++	JTransaction* jt = NULL;
+ 
+ 	try
+ 	{
+ 		EngineContextHolder tdbb(user_status, this, FB_FUNCTION);
+ 		check_database(tdbb);
+ 
+ 		start_transaction(tdbb, true, &tra, getHandle(), tpbLength, tpb);
++
++		jt = tra->getInterface(false);
++
++		if (jt)
++			tra->tra_flags &= ~TRA_own_interface;
++		else
++		{
++			jt = FB_NEW JTransaction(tra, getStable());
++			tra->setInterface(jt);
++			jt->addRef();
++		}
+ 	}
+ 	catch (const Exception& ex)
+ 	{
+@@
+ 	successful_completion(user_status);
+ 
+-	JTransaction* jt = tra->getInterface(false);
+-
+-	if (jt)
+-		tra->tra_flags &= ~TRA_own_interface;
+-	else
+-	{
+-		jt = FB_NEW JTransaction(tra, getStable());
+-		tra->setInterface(jt);
+-		jt->addRef();
+-	}
+-
+ 	return jt;
+```
+
+Сборка: `12.patch` + `spCache` + новый fix3 (сборка pr14b).
+
+| Система | Файл | md5 | Прочее |
+|---|---|---|---|
+| Linux | `libEngine13.so` | `8172699d70d39af1f10fba7bb87c43ba` | build-id `7a55d2c5c83c80b764e2dd6816e1402700d59ff0`; отладочный файл md5 `22b45819f30b50d7d81b1ed0bc1eddd8` |
+| Windows | `Engine13.dll` | `01c3930ba03c02869d3f0989425634a9` | Visual Studio 2026 (toolset 14.50), Release x64 |
+
+| Где | Объём | Результат |
+|---|---|---|
+| Linux, по умолчанию | 5 × 40 итераций | **нет зависаний**, abort нет |
+| Linux, `CPUS=0` (1 CPU) | 3 × 40 итераций | **нет зависаний**, abort нет |
+| Windows, 1 ядро | 2 × 40 циклов | **нет зависаний и падений**: 320 шагов, все с rc=0; самый долгий `gfix -shut full` — 3 с |
+
+На вопрос hvlad «Покажи свой вариант» (предложение 4) в PR #14 выложен
+[hqbird50-shutdown-hang-fix4-pr14.diff](hqbird50-shutdown-hang-fix4-pr14.diff):
+тот же код, что в fix34, от ветки PR, комментарии короче. В PR его нет.
+
 ## Сравнение сборок (тот же скрипт и объём)
 
 | Сборка | Linux, по умолчанию | Linux, 1 CPU | Windows, 1 ядро |
@@ -281,6 +347,7 @@ firebird!process_packet
 | fix34 (fix3 + предложение 4) | 10 × 40 без зависаний | 5 × 40 без зависаний | 4 × 40 без зависаний и падений |
 | 12.patch | зависание в итерации 1 | зависание в итерации 1 | падение в 4 из 4 (третья ошибка) |
 | **12.patch + `spCache` + fix3** | **10 × 40 без зависаний** | **5 × 40 без зависаний** | **4 × 40 без зависаний и падений** |
+| **то же, fix3 после ревью (PR #14)** | **5 × 40 без зависаний** | **3 × 40 без зависаний** | **2 × 40 без зависаний и падений** |
 
 ## Что предлагаем
 
@@ -305,6 +372,7 @@ firebird!process_packet
 | [hqbird50-shutdown-hang-min.sh](hqbird50-shutdown-hang-min.sh) | скрипт Linux |
 | [hqbird50-shutdown-hang-win/](hqbird50-shutdown-hang-win/) | скрипты Windows |
 | [hqbird50-shutdown-hang-fix3.diff](hqbird50-shutdown-hang-fix3.diff), [hqbird50-shutdown-hang-fix4.diff](hqbird50-shutdown-hang-fix4.diff) | сборки fix3 и fix34 для сравнения |
+| [hqbird50-shutdown-hang-fix4-pr14.diff](hqbird50-shutdown-hang-fix4-pr14.diff) | предложение 4 от ветки PR #14, как показано hvlad |
 
 Стеки, core и логи зависаний остаются на тестовом хосте; можем передать по
 запросу.
