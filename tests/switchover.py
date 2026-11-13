@@ -43,6 +43,9 @@ HELP = "switchover back and forth, failover of a lost host, automatic failover c
 
 CASES = ["switch", "hung", "failover", "rcmcut", "rcmrestart", "mastercut"]
 TAG = "switchover"
+# Seconds the ORPHANED check of "switch" waits for RCM's list to catch up:
+# two RCM polls (poll_interval_sec, 30 s by default) and a margin.
+ORPHANED_SETTLE = 75
 
 
 def add_args(p):
@@ -360,12 +363,21 @@ def case_switch(t, a, res):
     # it carries the generation the next switchover back continues, so each
     # master node keeps at most one. Replica records older than the case are
     # only listed: forgetdatabase removes them.
-    left = t.orphaned()
-    new = sorted(set(left["replicas"]) - before)
-    per_node = {}
-    for r in left["masters"]:
-        node = r.rsplit(" on ", 1)[-1]
-        per_node[node] = per_node.get(node, 0) + 1
+    # RCM lists what its last poll of each node saw (poll_interval_sec, 30 s
+    # by default), so a record rejoin_cleanup forgot a few seconds ago can
+    # still be listed (lab 2026-11-13: read 19 s after the forget). Read again
+    # until the list is right, for two polls and a margin.
+    deadline = time.time() + ORPHANED_SETTLE
+    while True:
+        left = t.orphaned()
+        new = sorted(set(left["replicas"]) - before)
+        per_node = {}
+        for r in left["masters"]:
+            node = r.rsplit(" on ", 1)[-1]
+            per_node[node] = per_node.get(node, 0) + 1
+        if (not new and all(n <= 1 for n in per_node.values())) or time.time() >= deadline:
+            break
+        time.sleep(10)
     check(res, "switch: no new ORPHANED replica record, one old master record at most per node",
           {"no new replica record": not new, "one per master node": all(n <= 1 for n in per_node.values())},
           orphaned_new=new, orphaned_older=sorted(set(left["replicas"]) & before), old_masters=left["masters"])
