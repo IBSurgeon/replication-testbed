@@ -543,6 +543,35 @@ class Svc(SW.Stand):
                         "error": job.get("error", ""), "reinit_id": rid, "operation_id": job["operation_id"]}
         raise TbError(f"reinit {master} -> {replica} (RCM {rid}): no end in {timeout} s")
 
+    def seed(self, frm, to, timeout=3600):
+        """The first copy of the service file on a fresh replica: a reinit
+        straight from frm's master node with target_path = the service path.
+        An RCM reinit puts a new replica under {root}/{source node}/{rel},
+        and the service needs the same path on every host. Returns
+        {state, phase, error, operation_id}."""
+        body = {"to": self.node_id(to, "replica"), "mode": "standard", "ignore_window": True, "allow_restart": True,
+                "hold_on_long_transactions": True, "target_path": self.path}
+        st, job0 = self.node(frm, "master", "GET", f"/v1/databases/{self.db}/reinit")
+        op0 = (job0 or {}).get("operation_id", "") if st == 200 and isinstance(job0, dict) else ""
+        end = time.time() + 600
+        while True:
+            st, resp = self.node(frm, "master", "POST", f"/v1/databases/{self.db}/reinit", body)
+            if st in (200, 202):
+                break
+            if time.time() > end:
+                raise TbError(f"seed {frm} -> {to}: {st} {json.dumps(resp)[:300]}")
+            time.sleep(20)
+        end = time.time() + timeout
+        while time.time() < end:
+            time.sleep(10)
+            st, job = self.node(frm, "master", "GET", f"/v1/databases/{self.db}/reinit")
+            if st != 200 or not isinstance(job, dict) or job.get("operation_id", "") in ("", op0):
+                continue
+            if job.get("phase") in ("ready", "done", "failed"):
+                return {"state": "failed" if job["phase"] == "failed" else "succeeded", "phase": job["phase"],
+                        "error": job.get("error", ""), "operation_id": job["operation_id"]}
+        raise TbError(f"seed {frm} -> {to}: no end in {timeout} s")
+
     def after_switch(self, to):
         """Load on the new master for --load-sec: segments of its GUID."""
         if self.a.no_load:
@@ -688,7 +717,7 @@ def case_setup(t, a, res):
         for h in t.hosts[1:]:
             t.raw(h, f"mkdir -p {x} && chown {owner} {x} && chmod {mode} {x}")
     for h in t.hosts[1:]:
-        op = t.reinit(a_host, h)
+        op = t.seed(a_host, h)
         check(res, f"setup: reinit {a_host} -> {h} at {t.path}", {"done": op.get("state") == "succeeded"},
               state=op.get("state"), error=op.get("error", ""))
     svc = {"alias": t.svc_id, "members": [
