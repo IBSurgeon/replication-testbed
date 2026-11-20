@@ -543,7 +543,7 @@ class Svc(SW.Stand):
                         "error": job.get("error", ""), "reinit_id": rid, "operation_id": job["operation_id"]}
         raise TbError(f"reinit {master} -> {replica} (RCM {rid}): no end in {timeout} s")
 
-    def seed(self, frm, to, timeout=3600):
+    def seed(self, frm, to, timeout=3600, overwrite=False):
         """The first copy of the service file on a fresh replica: a reinit
         straight from frm's master node with target_path = the service path.
         An RCM reinit puts a new replica under {root}/{source node}/{rel},
@@ -551,6 +551,8 @@ class Svc(SW.Stand):
         {state, phase, error, operation_id}."""
         body = {"to": self.node_id(to, "replica"), "mode": "standard", "ignore_window": True, "allow_restart": True,
                 "hold_on_long_transactions": True, "target_path": self.path}
+        if overwrite:
+            body["overwrite_non_replica"] = True
         st, job0 = self.node(frm, "master", "GET", f"/v1/databases/{self.db}/reinit")
         op0 = (job0 or {}).get("operation_id", "") if st == 200 and isinstance(job0, dict) else ""
         end = time.time() + 600
@@ -595,12 +597,17 @@ class Svc(SW.Stand):
         self.load_stop()
         end = time.time() + self.a.recover_wait
         silent = []
+        refused = ""
         suspect = False
         ok = False
         stuck = None
         while time.time() < end:
             rec = self.record(c)
             ap = self.applied(c)
+            st, job = self.node(b, "master", "GET", f"/v1/databases/{self.db}/reinit")
+            if st == 200 and isinstance(job, dict) and job.get("phase") == "failed"                     and job.get("peer_id") == self.node_id(c, "replica") and "target_not_replica" in (job.get("error") or ""):
+                refused = job.get("error", "")[:300]
+                break
             # NEEDS_REINIT with no reinit running from B for 180 s: nobody
             # brings C back; do not wait the whole --recover-wait.
             if rec.get("state") == "NEEDS_REINIT":
@@ -639,12 +646,16 @@ class Svc(SW.Stand):
             conds["RCM reinit after the operation"] = th.get("result") == "reinit" and bool(how)
         elif expect == "reinit_audit":
             conds["a reinit of C in its file audit"] = bool(how)
-        check(res, f"{case}: RCM brings C back within {self.a.recover_wait} s", conds,
+        if refused:
+            conds["RCM's reinit of C not refused"] = False
+        check(res, f"{case}: RCM brings C back within {self.a.recover_wait} s", conds, refused=refused,
               how="reinit " + ",".join(how) if how else "re-bind (no reinit in the audit)", third=th,
               state=self.record(c).get("state"), alerts=[x.get("code") for x in self.alerts(c, "replica")][:6])
         if not ok:
             try:
-                op = self.reinit(b, c)
+                # C left as a working file (replica mode none) is refused
+                # by an RCM reinit: the node's own reinit may replace it.
+                op = self.seed(b, c, overwrite=True) if refused else self.reinit(b, c)
                 okr, secs, det = self.files_equal(self.a.settle, b)
                 check(res, f"{case}: the test's reinit {b} -> {c} brings C back", {
                     "reinit done": op.get("state") == "succeeded", "files equal": okr},
