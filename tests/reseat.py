@@ -310,7 +310,8 @@ class Svc(SW.Stand):
     @staticmethod
     def reinit_ops(lines):
         return [f"{d.get('op')}:{d.get('reason', '')}" for d in lines
-                if "reinit" in (d.get("reason") or "") or d.get("op") in ("replace", "takeover")]
+                if d.get("op") != "firebird_restart"
+                and ("reinit" in (d.get("reason") or "") or d.get("op") in ("replace", "takeover"))]
 
     def replog_len(self, host):
         root = self.cl.h(self.tb(host))["firebird"]["root"]
@@ -366,13 +367,32 @@ class Svc(SW.Stand):
                 if bad:
                     diff[h] = {k: {"master": m[k][1:], "replica": (d.get(k) or (0, 0, 0))[1:]} for k in bad[:4]}
             states = {h: self.record(h).get("state") for h in self.hosts if h != master}
+            caught = {h: self.caught_up(h, states[h]) for h in states}
             detail = {"differ": diff, "states": states,
                       "tables": len(m or {}), "rows": sum(v[1] for v in (m or {}).values())}
-            if not diff and all(s in ("IN_SYNC", "LAGGING") for s in states.values()):
+            if not diff and all(caught.values()):
                 return True, round(time.time() - t0), detail
             if time.time() - t0 > timeout:
                 return False, round(time.time() - t0), detail
             time.sleep(15)
+
+    def caught_up(self, host, state):
+        """The replica applied all it has: IN_SYNC or LAGGING, or (whatever
+        its state says) an empty mailbox and the control file at a segment
+        boundary."""
+        if state in ("IN_SYNC", "LAGGING"):
+            return True
+        ap = self.applied(host)
+        return bool(ap.get("pending_known")) and ap.get("pending") == 0 and ap.get("control_offset") == 0             and (ap.get("applied_sequence") or 0) >= 1
+
+    def repair(self, res, case, host):
+        """A replica the node marked NEEDS_REINIT gets a reinit from the
+        master (through RCM), so that the next round can switch to it."""
+        master = self.master_host()
+        op = self.reinit(master, host)
+        res.record(f"{case}: repair: reinit {master} -> {host} (it was NEEDS_REINIT)",
+                   "PASS" if op.get("state") == "succeeded" else "FAIL", **op)
+        return op.get("state") == "succeeded"
 
     # --- load ---------------------------------------------------------------
     def load_start(self, master=None):
@@ -715,6 +735,10 @@ def one_switch(t, res, case, expect_class):
 
 
 def case_cycle(t, a, res):
+    m = t.master_host()
+    for h in t.hosts:
+        if h != m and t.record(h).get("state") == "NEEDS_REINIT":
+            t.repair(res, "cycle 0", h)
     for i in range(1, a.rounds + 1):
         t.load_start()
         t.wait_ready(t.next_host(t.master_host()))
@@ -738,13 +762,21 @@ def case_cycle(t, a, res):
         ok, secs, det = t.files_equal(a.settle, to)
         ap = t.applied(c)
         missing = t.replog_since(c, n0, "Required segment|is missing")
+        skipped = t.replog_since(c, n0, "due to GUID mismatch")
+        state = t.record(c).get("state")
+        gm = [x.get("code") for x in t.alerts(c, "replica") if x.get("code") == "replication_guid_mismatch"]
         check(res, f"cycle {i}: three files equal, {c} applied the new GUID from segment 1", {
             "equal": ok,
             "applied segments of the new GUID": norm_guid(ap.get("control_guid")) == guid
             and (ap.get("applied_sequence") or 0) >= 1,
             "no missing segment in replication.log": not missing,
-        }, seconds=secs, applied=ap.get("applied_sequence"), replication_log=missing, **det)
+            f"{c} not NEEDS_REINIT": state != "NEEDS_REINIT",
+            "no replication_guid_mismatch alert": not gm,
+        }, seconds=secs, applied=ap.get("applied_sequence"), replication_log=missing + skipped,
+            third_state=state, **det)
         if not ok:
+            return
+        if state == "NEEDS_REINIT" and not t.repair(res, f"cycle {i}", c):
             return
 
 
