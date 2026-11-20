@@ -48,6 +48,7 @@ import os
 import posixpath
 import re
 import tempfile
+import threading
 import time
 
 from tblib import rcmstand as RS
@@ -399,15 +400,44 @@ class Svc(SW.Stand):
         self.load_on = ""
 
     # --- RCM ----------------------------------------------------------------
+    def wait_ready(self, to, timeout=300):
+        """Waits until 'switchover -check' to `to` passes: the replicas are
+        IN_SYNC in RCM's poll snapshot. Returns the check answer."""
+        end = time.time() + timeout
+        while True:
+            rc, text, doc = self.rcm("switchover", "-service", self.svc_id, "-to", to, "-check")
+            if rc == 0 and (doc or {}).get("ok", True):
+                return doc or {}
+            if time.time() > end:
+                raise TbError(f"switchover -check to {to} does not pass in {timeout} s: {text[-400:]}")
+            time.sleep(15)
+
     def switch(self, to):
-        """One switchover; returns (rc, operation document, seconds)."""
+        """One switchover; returns (rc, operation document, seconds). The
+        load writes to the old master until its quiesce starts, then stops:
+        it goes to the master's address, not through a router, and would
+        attach again to the old master's file while the rejoin turns it into
+        a replica (gfix -replica: object in use)."""
         args = ["switchover", "-service", self.svc_id, "-to", to]
         if self.a.third_wait:
             args += ["-third-replica-wait", str(self.a.third_wait)]
         t0 = time.time()
-        rc, text, doc = self.rcm(*args)
+        box = {}
+
+        def call():
+            box["r"] = self.rcm(*args)
+
+        th = threading.Thread(target=call, daemon=True)
+        th.start()
+        while th.is_alive() and self.load_on:
+            if self.quiesce_started(t0):
+                self.load_stop()
+                break
+            th.join(2)
+        th.join()
+        rc, text, doc = box["r"]
         took = round(time.time() - t0)
-        op_id = (doc or {}).get("operation_id", "")
+        op_id = (doc or {}).get("operation_id", "") or (doc or {}).get("id", "")
         self.last_op = op_id
         if op_id:
             _, _, full = self.rcm("operations", "show", "-id", op_id)
@@ -416,6 +446,17 @@ class Svc(SW.Stand):
         if rc != 0 and not doc:
             doc = {"error": text[-400:]}
         return rc, doc or {}, took
+
+    def quiesce_started(self, t0):
+        """The running switchover of the service is at its quiesce step or later."""
+        _, _, doc = self.rcm("operations", "list", "-service", self.svc_id)
+        for op in (doc or {}).get("operations") or []:
+            if op.get("status") not in ("running", "", None):
+                continue
+            for st in op.get("steps") or []:
+                if st.get("id") == "quiesce" and st.get("state") in ("active", "done"):
+                    return True
+        return time.time() - t0 > 60
 
     def third_of(self, doc, host):
         """The operation's entry of the third replica on host."""
@@ -454,25 +495,33 @@ class Svc(SW.Stand):
     # --- C ------------------------------------------------------------------
     def reinit(self, frm, to, timeout=3600):
         """A reinit of the service file from frm's master node to to's
-        replica node, at the service path. Returns the node operation."""
-        body = {"to": self.node_id(to, "replica"), "mode": "standard", "ignore_window": True, "allow_restart": True,
-                "hold_on_long_transactions": True, "target_path": self.path}
+        replica node, through RCM: RCM clears its own marks of the replica
+        (a "turned to normal" mark left by a failed switchover makes the next
+        switchover skip turn_to_normal). Waits for the master node's job.
+        Returns {state, phase, error, reinit_id, operation_id}."""
+        master, replica = self.node_id(frm, "master"), self.node_id(to, "replica")
+        st, job0 = self.node(frm, "master", "GET", f"/v1/databases/{self.db}/reinit")
+        op0 = (job0 or {}).get("operation_id", "") if st == 200 else ""
         end = time.time() + 600
         while True:
-            st, resp = self.node(frm, "master", "POST", f"/v1/databases/{self.db}/reinit", body)
-            if st in (200, 202):
+            rc, text, doc = self.rcm("reinit", "-node", master, "-db", self.db, "-to", replica,
+                                     "-mode", "standard", "-allow-restart")
+            if rc == 0:
                 break
             if time.time() > end:
-                raise TbError(f"reinit {frm} -> {to}: {st} {json.dumps(resp)[:300]}")
+                raise TbError(f"reinit {master} -> {replica}: {text[-400:]}")
             time.sleep(20)
-        op_id = (resp or {}).get("operation_id", "")
+        rid = (doc or {}).get("reinit_id", "")
         end = time.time() + timeout
         while time.time() < end:
-            st, op = self.node(frm, "master", "GET", f"/v1/operations/{op_id}")
-            if st == 200 and op.get("state") not in ("in_progress", "queued", "pending", None):
-                return op
             time.sleep(10)
-        raise TbError(f"reinit {frm} -> {to}: operation {op_id} did not end in {timeout} s")
+            st, job = self.node(frm, "master", "GET", f"/v1/databases/{self.db}/reinit")
+            if st != 200 or not isinstance(job, dict) or job.get("operation_id", "") in ("", op0):
+                continue
+            if job.get("phase") in ("ready", "failed"):
+                return {"state": "succeeded" if job["phase"] == "ready" else "failed", "phase": job["phase"],
+                        "error": job.get("error", ""), "reinit_id": rid, "operation_id": job["operation_id"]}
+        raise TbError(f"reinit {master} -> {replica} (RCM {rid}): no end in {timeout} s")
 
     def after_switch(self, to):
         """Load on the new master for --load-sec: segments of its GUID."""
@@ -508,6 +557,7 @@ class Svc(SW.Stand):
         if self.last_op:
             _, _, d = self.rcm("operations", "show", "-id", self.last_op)
             th = self.third_of(d or {}, c)
+            save_doc(res, case + " after", d or {})
         check(res, f"{case}: no silent divergence (C never IN_SYNC under the new GUID with other data)",
               {"never": not silent}, seen=silent[:3])
         conds = {"back": ok}
@@ -523,7 +573,7 @@ class Svc(SW.Stand):
                 op = self.reinit(b, c)
                 okr, secs, det = self.files_equal(self.a.settle, b)
                 check(res, f"{case}: the test's reinit {b} -> {c} brings C back", {
-                    "reinit done": op.get("state") in ("done", "succeeded", "ok"), "files equal": okr},
+                    "reinit done": op.get("state") == "succeeded", "files equal": okr},
                     seconds=secs, op_state=op.get("state"), **det)
             except TbError as e:
                 res.record(f"{case}: the test's reinit {b} -> {c}", "FAIL", note=str(e)[:300])
@@ -539,11 +589,47 @@ def case_setup(t, a, res):
     if rc == 0 and doc and doc.get("members"):
         res.record("setup", "SKIP", note=f"service {t.svc_id} exists")
         return
+    a_host = t.hosts[0]
+    a_tb = t.tb(a_host)
     dbs = t.cl.test_dbs(which="db1")
     if not dbs:
-        raise TbError("no db1 on the master: run 'tb.py dbs prepare --count 1 --no-seed' first")
+        # An easy-install node has no databases.root: enroll the folder of
+        # 'dbs prepare' on the master node, then restart Firebird and turn
+        # the publication on, as 'dbs prepare' does on other stands.
+        root = posixpath.dirname(t.cl.master_dbs_dir(None).rstrip("/"))
+        rc, text, _ = t.rcm("enroll-databases", "-node", t.node_id(a_host, "master"), "-root", root)
+        if rc != 0:
+            raise TbError(f"enroll-databases {root}: {text[-300:]}")
+        end = time.time() + 180
+        while not dbs and time.time() < end:
+            time.sleep(10)
+            dbs = t.cl.test_dbs(which="db1")
+        if not dbs:
+            raise TbError("no db1 on the master: run 'tb.py dbs prepare --count 1 --no-seed' first")
+        from tblib import ops
+        try:
+            ops.restart_firebird(t.cl, a_tb, "test bed: reseat setup")
+        except TbError as e:
+            log(f"restart: {e}")
+        st, out = t.cl.api(a_tb, "POST", "/v1/publication/sync", {})
+        res.record("setup: db1 enrolled on the master node", "PASS", root=root, publication=st)
     t.path, t.db = dbs[0]["path"], dbs[0]["db_id"]
-    a_host = t.hosts[0]
+    # The replica node of every host scans the master node's folder (RCM's
+    # exclude_donor needs a databases.root on the donor); the one on the
+    # master host leaves out the master's file, as after a promote.
+    st, mc = t.node(a_host, "master", "GET", "/v1/config")
+    root = (((mc or {}).get("config") or {}).get("databases") or {}).get("root", "")
+    if not root:
+        raise TbError(f"{t.node_id(a_host, 'master')} has no databases.root")
+    rel = posixpath.relpath(t.path, root)
+    for h in t.hosts:
+        body = {"root": root, "recursive": True, "template": "*.fdb"}
+        if h == a_host:
+            body["exclude_paths"] = [rel]
+        st, out = t.node(h, "replica", "PUT", "/v1/config", {"databases": body})
+        if st != 200:
+            raise TbError(f"{t.node_id(h, 'replica')}: PUT /v1/config: {st} {json.dumps(out)[:300]}")
+    res.record("setup: databases.root of the replica nodes", "PASS", root=root, excluded_on=a_host)
     # Every master node ships to the replica node of every other host.
     want = [(t.node_id(f, "master"), t.node_id(o, "replica")) for f in t.hosts for o in t.hosts if f != o]
     doc = RS.rcm_json(t.cl, "cluster", "show")
@@ -559,15 +645,20 @@ def case_setup(t, a, res):
         if not t.wait_peer(host, "master", o, True):
             raise TbError(f"{f} does not list {o} as a peer after the link")
     res.record("setup: links master -> replica between every two hosts", "PASS", added=len(missing))
-    # The same directory on the other hosts, owned as on the master.
+    # The same folders on the other hosts, from the root down, owned as on
+    # the master (the replica node probes that it may write in the root).
     d = posixpath.dirname(t.path)
-    _, own = t.raw(a_host, f"stat -c '%U:%G %a' {d}")
-    owner, mode = own.split()
-    for h in t.hosts[1:]:
-        t.raw(h, f"mkdir -p {d} && chown {owner} {d} && chmod {mode} {d}")
+    dirs = [root]
+    for part in posixpath.relpath(d, root).split("/"):
+        dirs.append(posixpath.join(dirs[-1], part))
+    for x in dirs:
+        _, own = t.raw(a_host, f"stat -c '%U:%G %a' {x}")
+        owner, mode = own.split()
+        for h in t.hosts[1:]:
+            t.raw(h, f"mkdir -p {x} && chown {owner} {x} && chmod {mode} {x}")
     for h in t.hosts[1:]:
         op = t.reinit(a_host, h)
-        check(res, f"setup: reinit {a_host} -> {h} at {t.path}", {"done": op.get("state") in ("done", "succeeded", "ok")},
+        check(res, f"setup: reinit {a_host} -> {h} at {t.path}", {"done": op.get("state") == "succeeded"},
               state=op.get("state"), error=op.get("error", ""))
     svc = {"alias": t.svc_id, "members": [
         {"host": h, "master_node": t.node_id(h, "master"), "replica_node": t.node_id(h, "replica"),
@@ -586,6 +677,13 @@ def case_setup(t, a, res):
 
 
 # ------------------------------------------------------------------ cycle --
+def save_doc(res, case, doc):
+    """The whole operation document next to results.json."""
+    slug = re.sub(r"[^a-z0-9]+", "-", case.lower()).strip("-")
+    with open(os.path.join(res.dir, f"op-{slug}.json"), "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=1)
+
+
 def one_switch(t, res, case, expect_class):
     """A switchover to the next host, then --load-sec of load on it. Returns
     (frm, to, c, doc, t0, n0, guid) or None when the operation failed
@@ -600,12 +698,14 @@ def one_switch(t, res, case, expect_class):
     steps, status, epoch = SW.op_summary(doc)
     step = steps.get("reseat_replicas", {})
     th = t.third_of(doc, c)
+    save_doc(res, case, doc)
     conds = {"rc 0": rc == 0, "status ok": status == "ok", f"epoch {e0 + 1}": epoch == e0 + 1,
              "step reseat_replicas done": step.get("state") == "done"}
     if expect_class:
         conds[f"class {expect_class}"] = th.get("class") == expect_class
     check(res, f"{case}: {frm} -> {to}, third {c}", conds, seconds=took, third=th,
-          reseat_step=str(step.get("detail", ""))[:300],
+          reseat_step=str(step.get("detail", ""))[:300], op=t.last_op,
+          not_done=[k for k, v in steps.items() if v.get("state") != "done"],
           error=doc.get("error", "") if rc or status != "ok" else "", warnings=(doc.get("warnings") or [])[-4:])
     if rc != 0 or status != "ok":
         return None
@@ -617,6 +717,7 @@ def one_switch(t, res, case, expect_class):
 def case_cycle(t, a, res):
     for i in range(1, a.rounds + 1):
         t.load_start()
+        t.wait_ready(t.next_host(t.master_host()))
         got = one_switch(t, res, f"cycle {i}", "ready")
         if not got:
             return
@@ -653,6 +754,7 @@ def case_behind(t, a, res):
     to = t.next_host(frm)
     c = t.third(frm, to)
     t.load_start(frm)
+    t.wait_ready(to)
     body = {"database": t.db, "peer": t.node_id(c, "replica")}
     st, out = t.node(frm, "master", "POST", "/v1/shipping/pause", body)
     if st != 200:
@@ -672,6 +774,7 @@ def case_seg1(t, a, res):
     to = t.next_host(frm)
     c = t.third(frm, to)
     t.load_start(frm)
+    t.wait_ready(to)
     root = t.cl.h(t.tb(to))["firebird"]["root"]
     script = t.put_script(to, "tb-reseat-seg1.sh", WATCH_SEG1)
     t.raw(to, f"rm -f /tmp/tb-reseat-seg1.hit; nohup setsid sh {script} {root}/replication.conf {t.path} 900 "
@@ -724,7 +827,7 @@ def case_seg1(t, a, res):
                 res.record(f"seg1: the old master {frm} applied the new GUID (got segment 1 before the delete)", "PASS")
                 continue
         op = t.reinit(to, h)
-        res.record(f"seg1: reinit {to} -> {h}", "PASS" if op.get("state") in ("done", "succeeded", "ok") else "FAIL",
+        res.record(f"seg1: reinit {to} -> {h}", "PASS" if op.get("state") == "succeeded" else "FAIL",
                    state=op.get("state"), error=op.get("error", ""))
     ok, secs, det = t.files_equal(a.settle, to)
     check(res, "seg1: three files equal after the reinit", {"equal": ok}, seconds=secs, **det)
@@ -746,6 +849,7 @@ def case_kill(t, a, res):
         to = t.next_host(frm)
         c = t.third(frm, to)
         t.load_start(frm)
+        t.wait_ready(to)
         journal, ops = t.node_files(c, "replica")
         pat = t.node_dir(c, "replica") + "/hqclusternod[e] serve"
         m1, m2 = KILL_POINTS[p]
@@ -777,6 +881,7 @@ def case_noagent(t, a, res):
     c = t.third(frm, to)
     unit = t.cl.h(t.tb(c))["fbagent"].get("service") or "hqbirdfbagent"
     t.load_start(frm)
+    t.wait_ready(to)
     t.raw(c, f"systemctl stop {unit}")
     try:
         got = one_switch(t, res, "noagent", "failed")
@@ -797,6 +902,7 @@ def case_nolink(t, a, res):
     c = t.third(frm, to)
     link = (t.node_id(to, "master"), t.node_id(c, "replica"))
     t.load_start(frm)
+    t.wait_ready(to)
     t.cluster_links(drop=link)
     try:
         gone = t.wait_peer(c, "replica", link[0], False)

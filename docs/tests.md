@@ -671,9 +671,19 @@ straight to the master's Firebird and follows the master. Linux hosts only.
 The test compares data with its own digest: row count and a sum of the hash of
 every column, per table. Only tables with a unique key must be equal.
 
+The load stops when the quiesce step of a switchover starts (without a router
+it would attach again to the old master's file while the rejoin turns it into
+a replica: `gfix -replica` fails with "object in use") and starts again on the
+new master for `--load-sec` s. Before each switchover the test waits until
+`switchover -check` passes. Its own reinits go through RCM (`hqbirdrcm
+reinit`): a reinit made on the node directly leaves RCM's "turned to normal"
+mark of a failed switchover, and the next switchover then skips
+`turn_to_normal`. The whole operation document of each switchover is saved
+next to `results.json` (`op-<case>.json`).
+
 | Case | What it proves |
 |---|---|
-| `setup` | makes the service `--service` from db1 of `dbs prepare --count 1 --no-seed`: the same folder on the other hosts, a reinit with `target_path` to the replica node of each, the links master -> replica between every two hosts, `services put` with the three members. Skipped when the service exists |
+| `setup` | makes the service `--service` from db1 of `dbs prepare --count 1 --no-seed` (enrolled on the master node when the easy install left it no `databases.root`): the master node's `databases.root` on every replica node (RCM's `exclude_donor` needs it; the one on the master host leaves out the master's file, as after a promote), the same folders on the other hosts with the master's owner and mode, the links master -> replica between every two hosts, a reinit to the replica node of each, `services put` with the three members. Skipped when the service exists |
 | `cycle` | `--rounds` (40) switchovers A->B->C->A under load. After each: the operation `ok` at the next epoch, step `reseat_replicas` done, C of class `ready` with the result `done`, no reinit of C in its node's file audit, C's control file names B's GUID; after `--load-sec` s of load on B and with the load stopped, the three files are equal and C applied segments of B's GUID from segment 1 (no "Required segment" in `replication.log`) |
 | `behind` | the shipping A -> C is paused before the switchover (`/v1/shipping/pause`): C is behind at `apply`, class `behind`, the switchover `ok`, RCM reinits C after the operation (result `reinit`); files equal |
 | `seg1` | segment 1 of B's GUID is deleted on B before it reaches C: B halts the pair with a gap (alert `sequence_gap`), C applies nothing of B's GUID and is never `IN_SYNC` with other data; the test reinits C (and A when A missed it too); files equal |
