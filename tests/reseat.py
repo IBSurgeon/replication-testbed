@@ -572,6 +572,13 @@ class Svc(SW.Stand):
                         "error": job.get("error", ""), "operation_id": job["operation_id"]}
         raise TbError(f"seed {frm} -> {to}: no end in {timeout} s")
 
+    def file_guid(self, host):
+        """Database GUID from the header of the service file on host."""
+        root = self.cl.h(self.tb(host))["firebird"]["root"]
+        _, out = self.raw(host, f"{root}/bin/gstat -h {self.path} 2>/dev/null | grep 'Database GUID'", check=False)
+        m = re.search(r"\{?([0-9A-Fa-f-]{36})\}?", out or "")
+        return norm_guid(m.group(1)) if m else ""
+
     def after_switch(self, to):
         """Load on the new master for --load-sec: segments of its GUID."""
         if self.a.no_load:
@@ -769,7 +776,9 @@ def one_switch(t, res, case, expect_class):
           error=doc.get("error", "") if rc or status != "ok" else "", warnings=(doc.get("warnings") or [])[-4:])
     if rc != 0 or status != "ok":
         return None
-    guid = norm_guid(t.where()["master"].get("guid"))
+    # The GUID from the new master's file header: RCM's view lags when
+    # its new_guid step was skipped (the file had a GUID of its own).
+    guid = t.file_guid(to) or norm_guid(t.where()["master"].get("guid"))
     t.after_switch(to)
     return frm, to, c, doc, t0, n0, guid
 
