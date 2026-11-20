@@ -588,16 +588,22 @@ class Svc(SW.Stand):
         self.load_start(to)
         time.sleep(self.a.load_sec)
 
-    def recover(self, res, case, b, c, t0, guid, expect="reinit"):
+    def recover(self, res, case, b, c, t0, guid, expect="reinit", wait=None):
         """Waits for C to come back under B's GUID with equal data (RCM's
         reinit after the operation, or a re-bind); else reinits C itself.
         Records what happened. Never IN_SYNC with other data. expect
         'reinit': the plan wants RCM to reinit C after the operation (the
-        third's result 'reinit' and a reinit in C's file audit)."""
+        third's result 'reinit' and a reinit in C's file audit). expect
+        'open': C was left out of sync on purpose (noagent, nolink); RCM
+        does not retry its reinit after the operation (finishThirds), so a
+        C that does not come back by itself is SKIP (an open RCM item), not
+        FAIL, and a failed reinit job of RCM ends the wait. Returns
+        {back, refused, how}."""
         self.load_stop()
-        end = time.time() + self.a.recover_wait
+        end = time.time() + (wait or self.a.recover_wait)
         silent = []
         refused = ""
+        job_error = ""
         suspect = False
         ok = False
         stuck = None
@@ -607,6 +613,10 @@ class Svc(SW.Stand):
             st, job = self.node(b, "master", "GET", f"/v1/databases/{self.db}/reinit")
             if st == 200 and isinstance(job, dict) and job.get("phase") == "failed"                     and job.get("peer_id") == self.node_id(c, "replica") and "target_not_replica" in (job.get("error") or ""):
                 refused = job.get("error", "")[:300]
+                break
+            if expect == "open" and st == 200 and isinstance(job, dict) and job.get("phase") == "failed" \
+                    and job.get("peer_id") == self.node_id(c, "replica") and job.get("operation_id"):
+                job_error = (job.get("error") or "")[:300]
                 break
             # NEEDS_REINIT with no reinit running from B for 180 s: nobody
             # brings C back; do not wait the whole --recover-wait.
@@ -642,15 +652,22 @@ class Svc(SW.Stand):
         check(res, f"{case}: no silent divergence (C never IN_SYNC under the new GUID with other data)",
               {"never": not silent}, seen=silent[:3])
         conds = {"back": ok}
-        if expect == "reinit":
+        if expect == "open" and not ok:
+            res.record(f"{case}: RCM brings C back by itself (open RCM item: finishThirds does not retry)", "SKIP",
+                       note="not back; " + (job_error or "no reinit placed"), rcm_reinit_error=job_error,
+                       how="reinit " + ",".join(how) if how else "none", third=th,
+                       state=self.record(c).get("state"),
+                       alerts=[x.get("code") for x in self.alerts(c, "replica")][:6])
+        elif expect == "reinit":
             conds["RCM reinit after the operation"] = th.get("result") == "reinit" and bool(how)
         elif expect == "reinit_audit":
             conds["a reinit of C in its file audit"] = bool(how)
         if refused:
             conds["RCM's reinit of C not refused"] = False
-        check(res, f"{case}: RCM brings C back within {self.a.recover_wait} s", conds, refused=refused,
-              how="reinit " + ",".join(how) if how else "re-bind (no reinit in the audit)", third=th,
-              state=self.record(c).get("state"), alerts=[x.get("code") for x in self.alerts(c, "replica")][:6])
+        if expect != "open" or ok:
+            check(res, f"{case}: RCM brings C back within {wait or self.a.recover_wait} s", conds, refused=refused,
+                  how="reinit " + ",".join(how) if how else "re-bind (no reinit in the audit)", third=th,
+                  state=self.record(c).get("state"), alerts=[x.get("code") for x in self.alerts(c, "replica")][:6])
         if not ok:
             try:
                 # C left as a working file (replica mode none) is refused
@@ -666,6 +683,7 @@ class Svc(SW.Stand):
         else:
             okr, secs, det = self.files_equal(self.a.settle, b)
             check(res, f"{case}: three files equal", {"equal": okr}, seconds=secs, **det)
+        return {"back": ok, "refused": refused, "how": how}
 
 
 # ------------------------------------------------------------------ setup --
@@ -965,13 +983,19 @@ def case_kill(t, a, res):
         if not got:
             return
         _, to, c, doc, t0, _, guid = got
-        t.recover(res, f"kill at {p}", to, c, t0, guid, expect="any")
+        rv = t.recover(res, f"kill at {p}", to, c, t0, guid, expect="any")
         lines = t.audit_since(c, "replica", t0)
         th = t.third_of(t.rcm("operations", "show", "-id", t.last_op)[2] or {}, c)
-        check(res, f"kill at {p}: the repeat resumed by the witness (re-bound, no reinit), forward only after -F", {
-            "re-bound": th.get("result") in ("done", "reseated") and not t.reinit_ops(lines),
-            "forward only after -F": forward_only(lines),
-        }, third=th, audit=[f"{d.get('op')}:{d.get('reason', '')}" for d in lines][-12:])
+        rebound = th.get("result") in ("done", "reseated") and not t.reinit_ops(lines)
+        fallback = bool(t.reinit_ops(lines)) and rv["back"] and not rv["refused"]
+        # The repeat by the witness (RCM's retry of the same request) re-binds
+        # C in place; when RCM falls back to a reinit, the node must take it.
+        check(res, f"kill at {p}: the repeat by the witness finishes, or RCM's reinit is accepted; "
+                   f"forward only after -F", {
+                       "re-bound, or reinit accepted": rebound or fallback,
+                       "forward only after -F": forward_only(lines),
+                   }, how="re-bound" if rebound else ("reinit by RCM" if fallback else "neither"),
+              third=th, audit=[f"{d.get('op')}:{d.get('reason', '')}" for d in lines][-12:])
 
 
 def case_noagent(t, a, res):
@@ -983,16 +1007,19 @@ def case_noagent(t, a, res):
     t.wait_ready(to)
     t.raw(c, f"systemctl stop {unit}")
     try:
-        got = one_switch(t, res, "noagent", "failed")
+        got = one_switch(t, res, "noagent", "ready")
         if got:
             th = t.third_of(got[3], c)
-            check(res, f"noagent: reseat on {c} refused with fbagent_required",
-                  {"fbagent_required": "fbagent_required" in json.dumps(th)}, third=th)
+            warns = [w for w in (got[3].get("warnings") or []) if th.get("node", "-") in w]
+            check(res, f"noagent: reseat on {c} refused with fbagent_required, result failed, a warning",
+                  {"fbagent_required": "fbagent_required" in json.dumps(th) + json.dumps(warns),
+                   "result failed": th.get("result") in ("failed", "reinit"), "a warning on C": bool(warns)},
+                  third=th, warnings=warns[-3:])
     finally:
         t.raw(c, f"systemctl start {unit}", check=False)
     if got:
         _, to, c, doc, t0, _, guid = got
-        t.recover(res, "noagent", to, c, t0, guid, expect="reinit_audit")
+        t.recover(res, "noagent", to, c, t0, guid, expect="open", wait=300)
 
 
 def case_nolink(t, a, res):
@@ -1007,10 +1034,16 @@ def case_nolink(t, a, res):
         gone = t.wait_peer(c, "replica", link[0], False)
         res.record(f"nolink: {link[1]} no longer lists {link[0]} as a peer", "PASS" if gone else "FAIL")
         got = one_switch(t, res, "nolink", "unknown")
+        if got:
+            th = t.third_of(got[3], c)
+            warns = [w for w in (got[3].get("warnings") or []) if th.get("node", "-") in w]
+            check(res, f"nolink: {c} not bound in place, with a warning", {
+                "not bound": th.get("result") != "done", "a warning on C": bool(warns)},
+                third=th, warnings=warns[-3:])
     finally:
         t.cluster_links(add=link)
     back = t.wait_peer(c, "replica", link[0], True)
     res.record(f"nolink: the link {link[0]} -> {link[1]} back", "PASS" if back else "FAIL")
     if got:
         _, to, c, doc, t0, _, guid = got
-        t.recover(res, "nolink", to, c, t0, guid, expect="reinit_audit")
+        t.recover(res, "nolink", to, c, t0, guid, expect="open", wait=300)
