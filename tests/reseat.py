@@ -560,9 +560,20 @@ class Svc(SW.Stand):
         end = time.time() + self.a.recover_wait
         silent = []
         ok = False
+        stuck = None
         while time.time() < end:
             rec = self.record(c)
             ap = self.applied(c)
+            # NEEDS_REINIT with no reinit running from B for 180 s: nobody
+            # brings C back; do not wait the whole --recover-wait.
+            if rec.get("state") == "NEEDS_REINIT":
+                st, job = self.node(b, "master", "GET", f"/v1/databases/{self.db}/reinit")
+                idle = st != 200 or not isinstance(job, dict) or job.get("phase") in ("", None, "ready", "done", "failed")
+                stuck = (stuck or time.time()) if idle else None
+                if stuck and time.time() - stuck > 180:
+                    break
+            else:
+                stuck = None
             if rec.get("state") in ("IN_SYNC", "LAGGING"):
                 dc, db_ = self.digest(c), self.digest(b)
                 same = bool(dc and db_ and all(dc.get(k) == v for k, v in db_.items() if v[0]))
