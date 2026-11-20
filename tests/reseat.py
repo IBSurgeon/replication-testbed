@@ -595,6 +595,7 @@ class Svc(SW.Stand):
         self.load_stop()
         end = time.time() + self.a.recover_wait
         silent = []
+        suspect = False
         ok = False
         stuck = None
         while time.time() < end:
@@ -616,8 +617,14 @@ class Svc(SW.Stand):
                 if same and norm_guid(ap.get("control_guid")) == guid:
                     ok = True
                     break
-                if not same and norm_guid(ap.get("control_guid")) == guid:
-                    silent.append({"at": round(time.time() - t0), "state": rec.get("state")})
+                # Divergence, not lag: C applied all it has, under the new
+                # GUID, and its data still differ from B's on the next poll.
+                if not same and norm_guid(ap.get("control_guid")) == guid and self.caught_up(c, ""):
+                    if suspect:
+                        silent.append({"at": round(time.time() - t0), "state": rec.get("state")})
+                    suspect = True
+                else:
+                    suspect = False
             time.sleep(15)
         how = self.reinit_ops(self.audit_since(c, "replica", t0))
         th = {}
