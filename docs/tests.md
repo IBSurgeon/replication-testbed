@@ -683,7 +683,7 @@ next to `results.json` (`op-<case>.json`).
 
 | Case | What it proves |
 |---|---|
-| `setup` | makes the service `--service` from db1 of `dbs prepare --count 1 --no-seed` (enrolled on the master node when the easy install left it no `databases.root`): the master node's `databases.root` on every replica node (RCM's `exclude_donor` needs it; the one on the master host leaves out the master's file, as after a promote), the same folders on the other hosts with the master's owner and mode, the links master -> replica between every two hosts, a reinit to the replica node of each, `services put` with the three members. Skipped when the service exists |
+| `setup` | makes the service `--service` from db1 of `dbs prepare --count 1 --no-seed` (enrolled on the master node when the easy install left it no `databases.root`): the master node's `databases.root` on every replica node (RCM's `exclude_donor` needs it; the one on the master host leaves out the master's file, as after a promote), the same folders on the other hosts with the master's owner and mode, the links master -> replica between every two hosts, a reinit straight from the master node to the replica node of each at the service path (an RCM reinit puts a new replica under `{root}/{source node}/{rel}`), `services put` with the three members. Skipped when the service exists |
 | `cycle` | `--rounds` (40) switchovers A->B->C->A under load. After each: the operation `ok` at the next epoch, step `reseat_replicas` done, C of class `ready` with the result `done`, no reinit of C in its node's file audit, C's control file names B's GUID; after `--load-sec` s of load on B and with the load stopped, the three files are equal and C applied segments of B's GUID from segment 1 (no "Required segment" in `replication.log`); C is not `NEEDS_REINIT` and has no `replication_guid_mismatch` alert. A Firebird restart the reseat asks for (audit reason `reinit_load_conf`) is not a reinit. A replica left `NEEDS_REINIT` gets a reinit from the master (row `repair`), so that the next round can switch to it |
 | `behind` | the shipping A -> C is paused before the switchover (`/v1/shipping/pause`): C is behind at `apply`, class `behind`, the switchover `ok`, RCM reinits C after the operation (result `reinit`); files equal |
 | `seg1` | segment 1 of B's GUID is deleted on B before it reaches C: B halts the pair with a gap (alert `sequence_gap`), C applies nothing of B's GUID and is never `IN_SYNC` with other data; the test reinits C (and A when A missed it too); files equal |
@@ -692,9 +692,13 @@ next to `results.json` (`op-<case>.json`).
 | `nolink` | the link B -> C is taken out of the cluster (`cluster apply`): class `unknown`; the link back; RCM reinits C; files equal |
 
 In every negative case C must never be `IN_SYNC` under B's GUID with data other
-than B's. When RCM does not bring C back within `--recover-wait` s, the case
-fails and the test reinits C itself, so the next case starts from a working
-service. Each case puts back what it changed: shipping resumed, fbagent
+than B's (C applied all it has and its data differ on two polls in a row).
+When RCM does not bring C back within `--recover-wait` s, the case fails and
+the test reinits C itself, so the next case starts from a working service.
+The wait ends early when C is `NEEDS_REINIT` with no reinit from B for 180 s,
+or when RCM's reinit of C is refused with `target_not_replica` (a reseat that
+stopped after `gfix -replica none`); then the test replaces the file with the
+node's own reinit (`overwrite_non_replica`). Each case puts back what it changed: shipping resumed, fbagent
 started, the link back, the watch scripts on the hosts stopped.
 
 ```bash
