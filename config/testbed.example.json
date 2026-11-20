@@ -42,7 +42,9 @@
     "name_prefix": "tb",
     "firewall_name": "replication-testbed",
     "operator_ip": "auto",
-    "operator_ports": []
+    "operator_ports": [],
+    "_peer_ports": "More TCP ports open between the droplets, e.g. [5201] for iperf3. Set hosts.<h>.do_region to put one host in another region (a stand across the internet); then every addr is the public IP. $DIGITALOCEAN_TOKEN wins over token_file.",
+    "peer_ports": []
   },
 
   "artifacts": {

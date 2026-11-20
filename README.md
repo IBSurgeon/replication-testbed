@@ -37,6 +37,7 @@ git config core.hooksPath tools/hooks
 | Windows host | OpenSSH Server, an administrator account, Windows PowerShell 5.1, Firebird/HQbird installed as a service |
 | Network | node ports (default 7051/7052) open between master and replicas; 7443 open to the RCM host |
 | DigitalOcean droplets (`tb.py do create`) | **4 GB droplets**: `digitalocean.size` = `s-2vcpu-4gb`. Use this size for every stand |
+| DigitalOcean across regions | `hosts.<h>.do_region` puts a host in another region (e.g. FRA1 master, NYC1 replica); `addr` is then the public IP, the firewall opens node ports, `digitalocean.peer_ports` and ping between the droplets. The token: `$DIGITALOCEAN_TOKEN` or `digitalocean.token_file` |
 
 ## Quick start
 

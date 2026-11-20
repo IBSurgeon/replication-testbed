@@ -1,11 +1,18 @@
 """DigitalOcean hosts for the test bed: create, list, destroy droplets.
 
-Everything account-specific (token file, ssh key fingerprint, region, VPC)
+Everything account-specific (token file or $DIGITALOCEAN_TOKEN, ssh key
+fingerprint, region, VPC)
 comes from the "digitalocean" section of the local config. Droplets carry
 the test bed tag; destroy deletes ONLY droplets with that tag.
 
 create also writes the hosts' "ssh" (root@<public IP>) and "addr" (private
 VPC IP) into the local config file.
+
+hosts.<h>.do_region puts one host in another region (a stand across the
+internet, e.g. FRA1 <-> NYC1). Hosts in different regions share no VPC, so
+then every "addr" is the public IP, and the firewall opens the node ports
+(and digitalocean.peer_ports, e.g. 5201 for iperf3) to the droplets' public
+IPs as well.
 """
 import json
 import os
@@ -27,11 +34,15 @@ class DO:
         if not d:
             raise TbError("no 'digitalocean' section in the local config")
         self.d = d
-        tf = os.path.expanduser(d.get("token_file", ""))
-        if not tf or not os.path.isfile(tf):
-            raise TbError(f"digitalocean.token_file not found: {tf}")
-        with open(tf, encoding="utf-8") as f:
-            self.token = f.read().strip()
+        # DIGITALOCEAN_TOKEN wins over the token file: it cannot end up in a
+        # copy of a directory.
+        self.token = os.environ.get("DIGITALOCEAN_TOKEN", "").strip()
+        if not self.token:
+            tf = os.path.expanduser(d.get("token_file", ""))
+            if not tf or not os.path.isfile(tf):
+                raise TbError(f"set DIGITALOCEAN_TOKEN or digitalocean.token_file (not found: {tf})")
+            with open(tf, encoding="utf-8") as f:
+                self.token = f.read().strip()
         self.tag = d.get("tag", "replication-testbed")
         self.prefix = d.get("name_prefix", "tb")
 
@@ -62,13 +73,19 @@ class DO:
                 return n.get("ip_address")
         return None
 
-    def vpc(self):
-        if self.d.get("vpc_uuid"):
+    def region(self, h):
+        return self.cfg.raw.get("hosts", {}).get(h, {}).get("do_region") or self.d["region"]
+
+    def multi_region(self):
+        return len({self.region(h) for h in self.names()}) > 1
+
+    def vpc(self, region):
+        if self.d.get("vpc_uuid") and not self.multi_region():
             return self.d["vpc_uuid"]
         for v in self.call("GET", "/vpcs?per_page=200").get("vpcs", []):
-            if v.get("region") == self.d["region"] and v.get("default"):
+            if v.get("region") == region and v.get("default"):
                 return v["id"]
-        raise TbError(f"no default VPC in region {self.d['region']}; set digitalocean.vpc_uuid")
+        raise TbError(f"no default VPC in region {region}; set digitalocean.vpc_uuid")
 
     def operator_ip(self):
         ip = self.d.get("operator_ip", "auto")
@@ -77,7 +94,7 @@ class DO:
         with urllib.request.urlopen("https://api.ipify.org", timeout=15) as r:
             return r.read().decode().strip()
 
-    def firewall(self, droplet_ids):
+    def firewall(self, drops):
         name = self.d.get("firewall_name", "replication-testbed")
         ports = sorted({str(self.cfg.host(h)["node_port"]) for h in self.cfg.node_hosts()} |
                        {str(self.cfg.host(h)["companion"]["node_port"]) for h in self.cfg.companion_hosts()} |
@@ -87,7 +104,13 @@ class DO:
         src = {"addresses": [self.operator_ip() + "/32"]}
         inbound = [{"protocol": "tcp", "ports": p, "sources": src}
                    for p in ["22"] + [str(x) for x in self.d.get("operator_ports", [])]]
-        inbound += [{"protocol": "tcp", "ports": p, "sources": {"tags": [self.tag]}} for p in ports]
+        ports += [str(x) for x in self.d.get("peer_ports", [])]
+        peers = {"tags": [self.tag]}
+        if self.multi_region():
+            peers["addresses"] = sorted(self.ip(x, "public") + "/32" for x in drops)
+        inbound += [{"protocol": "tcp", "ports": p, "sources": peers} for p in ports]
+        # ping between the droplets: the RTT of a speed measurement.
+        inbound.append({"protocol": "icmp", "sources": peers})
         outbound = [{"protocol": pr, "ports": "all" if pr != "icmp" else "0",
                      "destinations": {"addresses": ["0.0.0.0/0", "::/0"]}} for pr in ("tcp", "udp", "icmp")]
         for o in outbound:
@@ -110,13 +133,17 @@ class DO:
         names = self.names()
         have = {x["name"]: x for x in self.droplets()}
         missing = [n for n in names.values() if n not in have]
-        if missing:
-            log(f"DO: create {', '.join(missing)} ({d['size']}, {d['image']}, {d['region']})")
+        by_region = {}
+        for h, n in names.items():
+            if n not in have:
+                by_region.setdefault(self.region(h), []).append(n)
+        for region, batch in sorted(by_region.items()):
+            log(f"DO: create {', '.join(batch)} ({d['size']}, {d['image']}, {region})")
             self.call("POST", "/droplets", {
-                "names": missing, "region": d["region"], "size": d["size"], "image": d["image"],
-                "ssh_keys": [d["ssh_key_fingerprint"]], "vpc_uuid": self.vpc(), "tags": [self.tag],
+                "names": batch, "region": region, "size": d["size"], "image": d["image"],
+                "ssh_keys": [d["ssh_key_fingerprint"]], "vpc_uuid": self.vpc(region), "tags": [self.tag],
                 "monitoring": False, "ipv6": False})
-        else:
+        if not missing:
             log("DO: all droplets exist")
         end = time.time() + 600
         while True:
@@ -128,7 +155,7 @@ class DO:
             if time.time() > end:
                 raise TbError("droplets not active with IPs after 10 min")
             time.sleep(10)
-        self.firewall([have[n]["id"] for n in names.values()])
+        self.firewall([have[n] for n in names.values()])
         self.write_hosts({h: have[n] for h, n in names.items()})
         for h, n in names.items():
             self.wait_ssh(self.ip(have[n], "public"))
@@ -151,11 +178,12 @@ class DO:
             raw = json.load(f)
         hosts = raw.setdefault("hosts", {})
         st = C.load_state()
+        multi = self.multi_region()
         for h, drop in drops.items():
             e = hosts.setdefault(h, {})
             e["os"] = "linux"
             e["ssh"] = f"root@{self.ip(drop, 'public')}"
-            e["addr"] = self.ip(drop, "private")
+            e["addr"] = self.ip(drop, "public" if multi else "private")
             st.setdefault("hosts", {}).setdefault(h, {})["do_droplet_id"] = drop["id"]
             log(f"  {h:10} {drop['name']:20} public {self.ip(drop, 'public'):16} private {self.ip(drop, 'private')}")
         tmp = path + ".tmp"
