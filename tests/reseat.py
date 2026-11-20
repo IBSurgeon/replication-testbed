@@ -401,9 +401,20 @@ class Svc(SW.Stand):
         master = master or self.master_host()
         n = self.tb(master)
         dsn = f"{self.addr(master)}/{self.cl.fb_port(n)}:{self.path}"
-        self.load_stop()
-        self.cl.module(self.load_host, "50-load", "start",
-                       {"dsn": dsn, "mode": "write", "conns": "2:4", "think_ms": 50, "extended": False, "tag": TAG})
+        # A busy lab host may time out fb-loadgen's first query (it exits
+        # early): try three times before the run stops.
+        for i in range(3):
+            self.load_stop()
+            try:
+                self.cl.module(self.load_host, "50-load", "start",
+                               {"dsn": dsn, "mode": "write", "conns": "2:4", "think_ms": 50, "extended": False,
+                                "tag": TAG})
+                break
+            except TbError as e:
+                if i == 2:
+                    raise
+                log(f"load start on {master}: {str(e)[:160]}; again in 20 s")
+                time.sleep(20)
         self.load_on = master
         time.sleep(10)
         self.load_total0 = self.load_total()
