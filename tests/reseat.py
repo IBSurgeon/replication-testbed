@@ -538,8 +538,8 @@ class Svc(SW.Stand):
             st, job = self.node(frm, "master", "GET", f"/v1/databases/{self.db}/reinit")
             if st != 200 or not isinstance(job, dict) or job.get("operation_id", "") in ("", op0):
                 continue
-            if job.get("phase") in ("ready", "failed"):
-                return {"state": "succeeded" if job["phase"] == "ready" else "failed", "phase": job["phase"],
+            if job.get("phase") in ("ready", "done", "failed"):
+                return {"state": "failed" if job["phase"] == "failed" else "succeeded", "phase": job["phase"],
                         "error": job.get("error", ""), "reinit_id": rid, "operation_id": job["operation_id"]}
         raise TbError(f"reinit {master} -> {replica} (RCM {rid}): no end in {timeout} s")
 
