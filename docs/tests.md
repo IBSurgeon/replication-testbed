@@ -654,3 +654,43 @@ python tb.py rcm up
 python tb.py test switchover [--only switch,mastercut] [--rounds 2] [--cut 150] [--no-load]
 python tb.py test switchover --only hung,failover --fence-mode shutdown --disable-table COUNTRY
 ```
+
+## reseat
+
+The switchover keeps its replicas (hqcluster-node
+`docs/switchover-keep-replicas-plan.ru.md`, stage 3). At a planned switchover
+A -> B the third replica C is re-bound in place to B: RCM step
+`reseat_replicas`, node `POST /v1/databases/{db_id}/reseat` (protocol minor
+28). Make the stand with `tb.py rcm up --easy` on three hosts (a master and a
+replica node on each, `<host>-master` and `<host>-replica`) and node and RCM
+builds with the reseat. The service is one database at the same path on all
+three hosts: the node makes db_id from the path, and the reseat needs C's
+db_id to be B's. fb-loadgen on `--load-host` (default the RCM host) writes
+straight to the master's Firebird and follows the master. Linux hosts only.
+
+The test compares data with its own digest: row count and a sum of the hash of
+every column, per table. Only tables with a unique key must be equal.
+
+| Case | What it proves |
+|---|---|
+| `setup` | makes the service `--service` from db1 of `dbs prepare --count 1 --no-seed`: the same folder on the other hosts, a reinit with `target_path` to the replica node of each, the links master -> replica between every two hosts, `services put` with the three members. Skipped when the service exists |
+| `cycle` | `--rounds` (40) switchovers A->B->C->A under load. After each: the operation `ok` at the next epoch, step `reseat_replicas` done, C of class `ready` with the result `done`, no reinit of C in its node's file audit, C's control file names B's GUID; after `--load-sec` s of load on B and with the load stopped, the three files are equal and C applied segments of B's GUID from segment 1 (no "Required segment" in `replication.log`) |
+| `behind` | the shipping A -> C is paused before the switchover (`/v1/shipping/pause`): C is behind at `apply`, class `behind`, the switchover `ok`, RCM reinits C after the operation (result `reinit`); files equal |
+| `seg1` | segment 1 of B's GUID is deleted on B before it reaches C: B halts the pair with a gap (alert `sequence_gap`), C applies nothing of B's GUID and is never `IN_SYNC` with other data; the test reinits C (and A when A missed it too); files equal |
+| `kill` | C's node is killed (`kill -9`, systemd starts it again) at each point of `--kill-points`: `witness` (witness written), `lock` (after `nbackup -L`), `fixup` (after `-F`), `fixed` (header checked), `control` (control file G2:0 written), `conf` (`source_guid` written). The switchover `ok`; RCM's repeat resumes by the witness and C ends re-bound with no reinit; after `-F` only forward; files equal |
+| `noagent` | fbagent on C is stopped: reseat refused with `fbagent_required`, class `failed`; fbagent started again; RCM reinits C; files equal |
+| `nolink` | the link B -> C is taken out of the cluster (`cluster apply`): class `unknown`; the link back; RCM reinits C; files equal |
+
+In every negative case C must never be `IN_SYNC` under B's GUID with data other
+than B's. When RCM does not bring C back within `--recover-wait` s, the case
+fails and the test reinits C itself, so the next case starts from a working
+service. Each case puts back what it changed: shipping resumed, fbagent
+started, the link back, the watch scripts on the hosts stopped.
+
+```bash
+python tb.py rcm up --easy
+python tb.py dbs prepare --count 1 --no-seed
+python tb.py test reseat --only setup --service st3
+python tb.py test reseat --only cycle --rounds 40
+python tb.py test reseat --only behind,seg1,kill,noagent,nolink [--third-wait 30] [--kill-points fixup,conf]
+```
