@@ -816,7 +816,10 @@ def one_switch(t, res, case, expect_class):
     conds = {"rc 0": rc == 0, "status ok": status == "ok", f"epoch {e0 + 1}": epoch == e0 + 1,
              "step reseat_replicas done": step.get("state") == "done"}
     if expect_class:
-        conds[f"class {expect_class}"] = th.get("class") == expect_class
+        # The class RCM gave at apply; a refused reseat turns it to failed
+        # in the final document (noagent), the apply step keeps it.
+        at_apply = f"{th.get('node', '-')} {expect_class}" in str(steps.get("apply", {}).get("detail", ""))
+        conds[f"class {expect_class}"] = th.get("class") == expect_class or at_apply
     check(res, f"{case}: {frm} -> {to}, third {c}", conds, seconds=took, third=th,
           reseat_step=str(step.get("detail", ""))[:300], op=t.last_op,
           not_done=[k for k, v in steps.items() if v.get("state") != "done"],
